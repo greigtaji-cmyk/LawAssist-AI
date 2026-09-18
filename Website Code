@@ -1,0 +1,1667 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LegalMind AI</title>
+
+<style>
+*{box-sizing:border-box}
+
+body{
+    margin:0;
+    background:#07111f;
+    color:#edf5ff;
+    font:14px Segoe UI,Arial,sans-serif
+}
+
+header{
+    height:72px;
+    padding:0 7%;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    background:#091827;
+    border-bottom:1px solid #203651;
+    position:sticky;
+    top:0;
+    z-index:2
+}
+
+.logo{
+    display:flex;
+    gap:12px;
+    align-items:center
+}
+
+.mark{
+    width:40px;
+    height:40px;
+    border-radius:11px;
+    display:grid;
+    place-items:center;
+    background:linear-gradient(135deg,#4db9ff,#7868ff);
+    font-size:21px
+}
+
+.brand{
+    font-size:20px;
+    font-weight:800
+}
+
+.sub{
+    font-size:11px;
+    color:#91a8c0
+}
+
+nav a{
+    color:#b9cadb;
+    text-decoration:none;
+    margin-left:22px
+}
+
+main{
+    max-width:1250px;
+    margin:auto;
+    padding:42px 24px
+}
+
+.hero{
+    display:grid;
+    grid-template-columns:1.3fr .7fr;
+    gap:22px
+}
+
+.badge{
+    display:inline-block;
+    padding:7px 11px;
+    border-radius:20px;
+    background:#0b243c;
+    border:1px solid #285477;
+    color:#9ed8ff;
+    font-size:11px
+}
+
+.hero h1{
+    font-size:50px;
+    line-height:1.05;
+    margin:18px 0
+}
+
+.hero p{
+    color:#9fb1c6;
+    line-height:1.7;
+    font-size:16px;
+    max-width:760px
+}
+
+.panel{
+    background:#0d1c2e;
+    border:1px solid #203650;
+    border-radius:18px;
+    padding:22px;
+    box-shadow:0 18px 60px #0003
+}
+
+.grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:18px;
+    margin-top:24px
+}
+
+.full{
+    grid-column:1/-1
+}
+
+textarea{
+    width:100%;
+    height:245px;
+    background:#071525;
+    border:1px solid #2a4663;
+    border-radius:12px;
+    color:#edf5ff;
+    padding:16px;
+    font:14px/1.65 inherit;
+    resize:vertical
+}
+
+button{
+    border:0;
+    border-radius:10px;
+    padding:12px 18px;
+    background:linear-gradient(135deg,#54bcff,#697bff);
+    font-weight:800;
+    cursor:pointer
+}
+
+button:hover{
+    opacity:.9
+}
+
+button.alt{
+    background:#172b43;
+    color:#d7e5f3;
+    border:1px solid #2c4864
+}
+
+.row{
+    display:flex;
+    gap:10px;
+    align-items:center;
+    flex-wrap:wrap;
+    margin-top:12px
+}
+
+.card{
+    background:#091827;
+    border:1px solid #203b58;
+    border-radius:12px;
+    padding:14px;
+    margin:9px 0
+}
+
+.score{
+    float:right;
+    color:#91d2ff;
+    font-weight:800
+}
+
+.muted{
+    color:#91a6bb
+}
+
+.tag{
+    display:inline-block;
+    background:#142c46;
+    color:#b9dbf5;
+    padding:4px 7px;
+    border-radius:6px;
+    font-size:11px;
+    margin:2px
+}
+
+.notice{
+    border-left:3px solid #ffb76b;
+    background:#211b16;
+    padding:13px;
+    color:#e5d7c8;
+    border-radius:7px;
+    line-height:1.5;
+    font-size:12px
+}
+
+.empty{
+    text-align:center;
+    color:#71869d;
+    padding:30px
+}
+
+footer{
+    text-align:center;
+    color:#6e839a;
+    padding:35px
+}
+
+a{
+    color:#78c9ff
+}
+
+@media(max-width:850px){
+
+    .hero,
+    .grid{
+        grid-template-columns:1fr
+    }
+
+    .full{
+        grid-column:auto
+    }
+
+    .hero h1{
+        font-size:38px
+    }
+
+    nav{
+        display:none
+    }
+}
+</style>
+</head>
+
+
+<body>
+
+<header>
+
+<div class="logo">
+
+<div class="mark">
+⚖
+</div>
+
+<div>
+
+<div class="brand">
+LegalMind AI
+</div>
+
+<div class="sub">
+LEGAL RESEARCH & CASE ANALYSIS
+</div>
+
+</div>
+
+</div>
+
+
+<nav>
+
+<a href="#analyze">
+Analyze
+</a>
+
+<a href="#results">
+Results
+</a>
+
+<a href="#sources">
+Sources
+</a>
+
+</nav>
+
+</header>
+
+
+<main>
+
+
+<section class="hero">
+
+<div>
+
+<span class="badge">
+INDIA • LOCAL WEB APP
+</span>
+
+<h1>
+Legal research, organized around your case.
+</h1>
+
+<p>
+Enter a problem statement and turn it into a
+structured research workspace with potential law
+leads, precedent leads, evidence checks and
+follow-up questions.
+</p>
+
+</div>
+
+
+<div class="panel">
+
+<div
+style="
+display:grid;
+grid-template-columns:repeat(3,1fr);
+gap:12px
+"
+>
+
+<div>
+
+<b style="font-size:28px">
+10+
+</b>
+
+<div class="muted">
+Law areas
+</div>
+
+</div>
+
+
+<div>
+
+<b style="font-size:28px">
+5
+</b>
+
+<div class="muted">
+Case leads
+</div>
+
+</div>
+
+
+<div>
+
+<b style="font-size:28px">
+6
+</b>
+
+<div class="muted">
+Evidence checks
+</div>
+
+</div>
+
+</div>
+
+
+<div
+class="notice"
+style="margin-top:20px"
+>
+
+Human verification is required.
+
+This system provides research signals,
+not a determination of guilt, liability
+or legal outcome.
+
+</div>
+
+</div>
+
+</section>
+
+
+<section
+id="analyze"
+class="grid"
+>
+
+
+<div class="panel full">
+
+<h2>
+Case Analyzer
+</h2>
+
+<p class="muted">
+
+Describe the facts, parties, dates,
+transactions, communications and evidence.
+
+</p>
+
+
+<textarea
+id="problem"
+placeholder="Example: On 12/05/2025, a person paid ₹50,000 after a false promise that a service would be delivered. The seller stopped responding on WhatsApp and refused a refund. The buyer has bank and message records."
+></textarea>
+
+
+<div class="row">
+
+<button onclick="run()">
+🔎 Analyze Case
+</button>
+
+
+<button
+class="alt"
+onclick="demo()"
+>
+Load Demo
+</button>
+
+
+<button
+class="alt"
+onclick="clearAll()"
+>
+Clear
+</button>
+
+
+<button
+class="alt"
+onclick="selfTest()"
+>
+Run Self-Test
+</button>
+
+
+<span
+id="status"
+class="muted"
+></span>
+
+</div>
+
+</div>
+
+
+<div class="panel">
+
+<h2>
+Potential Laws
+</h2>
+
+<div
+id="laws"
+class="empty"
+>
+Run an analysis to see research leads.
+</div>
+
+</div>
+
+
+<div class="panel">
+
+<h2>
+Similar Case Leads
+</h2>
+
+<div
+id="cases"
+class="empty"
+>
+Run an analysis to see research leads.
+</div>
+
+</div>
+
+
+<div class="panel">
+
+<h2>
+Evidence Review
+</h2>
+
+<div
+id="evidence"
+class="empty"
+>
+Run an analysis to see evidence signals.
+</div>
+
+</div>
+
+
+<div class="panel">
+
+<h2>
+Follow-up Questions
+</h2>
+
+<div
+id="questions"
+class="empty"
+>
+Run an analysis to generate questions.
+</div>
+
+</div>
+
+
+<div
+class="panel full"
+id="results"
+>
+
+<h2>
+Case Summary
+</h2>
+
+<div
+id="summary"
+class="empty"
+>
+Your case ID and verification status
+will appear here.
+</div>
+
+</div>
+
+</section>
+
+
+<section
+id="sources"
+class="panel"
+style="margin-top:18px"
+>
+
+<h2>
+Official Research Sources
+</h2>
+
+<div class="row">
+
+<a
+href="https://www.indiacode.nic.in/"
+target="_blank"
+rel="noopener"
+>
+India Code ↗
+</a>
+
+
+<a
+href="https://www.sci.gov.in/judgements-judge/"
+target="_blank"
+rel="noopener"
+>
+Supreme Court Judgments ↗
+</a>
+
+
+<a
+href="https://ecourts.gov.in/"
+target="_blank"
+rel="noopener"
+>
+eCourts ↗
+</a>
+
+</div>
+
+</section>
+
+
+</main>
+
+
+<footer>
+
+LegalMind AI • Local web prototype •
+Verify current law and complete judgments
+
+</footer>
+
+
+<script>
+
+/* ============================================================
+   LEGAL DATABASE
+   ============================================================ */
+
+const LAW_DB = [
+
+[
+"Bharatiya Nyaya Sanhita, 2023",
+"Section 115",
+"Voluntarily causing hurt / related hurt offences",
+[
+"hurt",
+"injury",
+"assault",
+"beaten",
+"slap",
+"punch",
+"wound",
+"physical harm"
+]
+],
+
+[
+"Bharatiya Nyaya Sanhita, 2023",
+"Section 303",
+"Theft",
+[
+"theft",
+"stole",
+"stolen",
+"taken",
+"took",
+"without permission",
+"movable property"
+]
+],
+
+[
+"Bharatiya Nyaya Sanhita, 2023",
+"Section 316",
+"Criminal breach of trust",
+[
+"entrusted",
+"entrustment",
+"misappropriation",
+"embezzled",
+"breach of trust"
+]
+],
+
+[
+"Bharatiya Nyaya Sanhita, 2023",
+"Section 318",
+"Cheating",
+[
+"cheat",
+"cheated",
+"cheating",
+"fraud",
+"deceived",
+"deception",
+"false promise",
+"misrepresentation",
+"scam"
+]
+],
+
+[
+"Bharatiya Nyaya Sanhita, 2023",
+"Section 351",
+"Criminal intimidation",
+[
+"threat",
+"threatened",
+"threatening",
+"intimidate",
+"blackmail"
+]
+],
+
+[
+"Bharatiya Nyaya Sanhita, 2023",
+"Section 356",
+"Defamation",
+[
+"defamation",
+"defamed",
+"reputation",
+"false allegation",
+"false accusation",
+"published false"
+]
+],
+
+[
+"Information Technology Act, 2000",
+"Section 66",
+"Computer-related offences",
+[
+"hacked",
+"hack",
+"unauthorized access",
+"computer",
+"password stolen",
+"account hacked"
+]
+],
+
+[
+"Digital Personal Data Protection Act, 2023",
+"Applicable provisions depend on facts and provisions in force",
+"Digital personal data",
+[
+"personal data",
+"personal information",
+"data leak",
+"data breach",
+"private information",
+"customer data"
+]
+],
+
+[
+"Consumer Protection Act, 2019",
+"Applicable provisions depend on facts",
+"Consumer dispute / deficiency / unfair trade practice",
+[
+"consumer",
+"defective product",
+"defective",
+"service failed",
+"refund",
+"unfair trade",
+"deficiency in service",
+"seller"
+]
+],
+
+[
+"Indian Contract Act, 1872",
+"Applicable provisions depend on contract and remedy",
+"Contract / breach",
+[
+"contract",
+"agreement",
+"breach",
+"failed to pay",
+"non-payment",
+"promise in contract"
+]
+]
+
+];
+
+
+/* ============================================================
+   CASE DATABASE
+   ============================================================ */
+
+const CASES = [
+
+[
+"Lalita Kumari v. Government of Uttar Pradesh",
+"2013",
+"FIR / police / cognizable offences",
+[
+"fir",
+"police",
+"cognizable",
+"complaint"
+]
+],
+
+[
+"Arnesh Kumar v. State of Bihar",
+"2014",
+"arrest / criminal procedure",
+[
+"arrest",
+"custody",
+"police",
+"criminal procedure"
+]
+],
+
+[
+"State of Haryana v. Bhajan Lal",
+"1992",
+"FIR / quashing / criminal procedure",
+[
+"fir",
+"quashing",
+"criminal procedure",
+"abuse of process"
+]
+],
+
+[
+"K.S. Puttaswamy v. Union of India",
+"2017",
+"privacy / personal data",
+[
+"privacy",
+"personal data",
+"data",
+"personal information"
+]
+],
+
+[
+"Indian Medical Association v. V.P. Shantha",
+"1995",
+"consumer / deficiency in service",
+[
+"consumer",
+"medical",
+"hospital",
+"deficiency",
+"service"
+]
+]
+
+];
+
+
+/* ============================================================
+   NORMALIZATION
+   ============================================================ */
+
+function norm(text){
+
+    return (text || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9\s₹]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+}
+
+
+/* ============================================================
+   SAFE TERM MATCHING
+   ============================================================ */
+
+function hasTerm(text, term){
+
+    const p = norm(text);
+    const t = norm(term);
+
+    if(!t){
+        return false;
+    }
+
+    /*
+       For phrases, use contains().
+    */
+
+    if(t.includes(" ")){
+        return p.includes(t);
+    }
+
+    /*
+       For single words, use word boundaries.
+    */
+
+    const escaped =
+        t.replace(
+            /[.*+?^${}()|[\]\\]/g,
+            "\\$&"
+        );
+
+    return new RegExp(
+        "\\b" +
+        escaped +
+        "\\b",
+        "i"
+    ).test(p);
+
+}
+
+
+/* ============================================================
+   CASE ID
+   ============================================================ */
+
+function makeId(text){
+
+    let hash = 2166136261;
+
+    for(
+        let i = 0;
+        i < text.length;
+        i++
+    ){
+
+        hash ^= text.charCodeAt(i);
+
+        hash =
+            Math.imul(
+                hash,
+                16777619
+            );
+
+    }
+
+    return (
+        "LM-" +
+        (hash >>> 0)
+        .toString(16)
+        .toUpperCase()
+        .padStart(8,"0")
+    );
+
+}
+
+
+/* ============================================================
+   ANALYSIS
+   ============================================================ */
+
+function analyze(raw){
+
+    const p = norm(raw);
+
+    const laws = [];
+    const cases = [];
+
+
+    /* --------------------------------------------------------
+       LAW MATCHING
+       -------------------------------------------------------- */
+
+    LAW_DB.forEach(
+        item => {
+
+            const hits =
+                item[3].filter(
+                    keyword =>
+                        hasTerm(
+                            raw,
+                            keyword
+                        )
+                );
+
+
+            if(hits.length){
+
+                laws.push({
+
+                    act: item[0],
+
+                    section: item[1],
+
+                    title: item[2],
+
+                    hits: hits,
+
+                    score:
+                        Math.min(
+                            100,
+                            20 +
+                            18 * hits.length
+                        )
+
+                });
+
+            }
+
+        }
+    );
+
+
+    laws.sort(
+        (a,b) =>
+            b.score - a.score
+    );
+
+
+    /* --------------------------------------------------------
+       CASE MATCHING
+       -------------------------------------------------------- */
+
+    CASES.forEach(
+        item => {
+
+            const hits =
+                item[3].filter(
+                    keyword =>
+                        hasTerm(
+                            raw,
+                            keyword
+                        )
+                );
+
+
+            if(hits.length){
+
+                cases.push({
+
+                    name: item[0],
+
+                    year: item[1],
+
+                    topic: item[2],
+
+                    hits: hits,
+
+                    score:
+                        Math.min(
+                            100,
+                            35 +
+                            15 * hits.length
+                        )
+
+                });
+
+            }
+
+        }
+    );
+
+
+    cases.sort(
+        (a,b) =>
+            b.score - a.score
+    );
+
+
+    /* --------------------------------------------------------
+       EVIDENCE
+       -------------------------------------------------------- */
+
+    const evidence = [
+
+        [
+            "Chronology / dates",
+
+            /\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/
+            .test(raw)
+            ||
+            /\b(?:19|20)\d{2}\b/
+            .test(raw)
+        ],
+
+        [
+            "Digital communications",
+
+            [
+                "whatsapp",
+                "email",
+                "message",
+                "sms"
+            ].some(
+                x => hasTerm(raw,x)
+            )
+        ],
+
+        [
+            "Financial records",
+
+            [
+                "money",
+                "payment",
+                "paid",
+                "loan",
+                "bank",
+                "upi",
+                "refund"
+            ].some(
+                x => hasTerm(raw,x)
+            )
+        ],
+
+        [
+            "Contracts / documents",
+
+            [
+                "contract",
+                "agreement",
+                "invoice",
+                "notice",
+                "receipt"
+            ].some(
+                x => hasTerm(raw,x)
+            )
+        ],
+
+        [
+            "Witness evidence",
+
+            hasTerm(
+                raw,
+                "witness"
+            )
+        ],
+
+        [
+            "Medical / physical evidence",
+
+            [
+                "injury",
+                "medical",
+                "hospital",
+                "assault"
+            ].some(
+                x => hasTerm(raw,x)
+            )
+        ]
+
+    ];
+
+
+    /* --------------------------------------------------------
+       QUESTIONS
+       -------------------------------------------------------- */
+
+    const questions = [
+
+        "What is the exact date or date range of the incident?",
+
+        "Where did the incident occur?",
+
+        "Who are the people/entities involved and what was each person's role?",
+
+        "What documents, recordings, messages, witnesses or other evidence support each material fact?",
+
+        "Has a complaint, FIR, notice or case already been filed?",
+
+        "Could any fact support an alternative explanation or defence?",
+
+        "Is there any connected act before or after the main incident that may change the analysis?"
+
+    ];
+
+
+    if(
+        [
+            "money",
+            "payment",
+            "paid",
+            "loan",
+            "transaction",
+            "refund"
+        ].some(
+            x => hasTerm(raw,x)
+        )
+    ){
+
+        questions.push(
+            "What amount was involved and what records prove the payment or promise?"
+        );
+
+    }
+
+
+    if(
+        [
+            "whatsapp",
+            "email",
+            "message",
+            "online",
+            "account",
+            "hacked",
+            "data"
+        ].some(
+            x => hasTerm(raw,x)
+        )
+    ){
+
+        questions.push(
+            "Do you have original digital evidence, timestamps, URLs, logs or device records?"
+        );
+
+    }
+
+
+    /* --------------------------------------------------------
+       RESULT
+       -------------------------------------------------------- */
+
+    return {
+
+        case_id:
+            makeId(p),
+
+        laws:
+            laws,
+
+        cases:
+            cases,
+
+        evidence:
+            evidence,
+
+        questions:
+            questions,
+
+        generated:
+            new Date()
+            .toLocaleString(
+                "en-IN"
+            ),
+
+        notice:
+            "Research support only. Textual matches do not establish that a law was violated. Verify current legislation, commencement, amendments, jurisdiction, procedure, limitation and complete judgments before relying on the output."
+
+    };
+
+}
+
+
+/* ============================================================
+   DISPLAY RESULTS
+   ============================================================ */
+
+function render(data){
+
+
+    /* --------------------------------------------------------
+       LAWS
+       -------------------------------------------------------- */
+
+    document
+        .getElementById("laws")
+        .innerHTML =
+
+        data.laws.length
+
+        ?
+
+        data.laws.map(
+            law => `
+
+            <div class="card">
+
+                <span class="score">
+                    ${law.score}/100
+                </span>
+
+                <b>
+                    ${law.act}
+                    —
+                    ${law.section}
+                </b>
+
+                <div class="muted">
+                    ${law.title}
+                </div>
+
+                <p>
+
+                    ${law.hits
+                        .map(
+                            hit =>
+                            `<span class="tag">
+                                ${hit}
+                            </span>`
+                        )
+                        .join("")
+                    }
+
+                </p>
+
+            </div>
+
+            `
+        )
+        .join("")
+
+        :
+
+        `
+        <div class="empty">
+            No local law match.
+        </div>
+        `;
+
+
+    /* --------------------------------------------------------
+       CASES
+       -------------------------------------------------------- */
+
+    document
+        .getElementById("cases")
+        .innerHTML =
+
+        data.cases.length
+
+        ?
+
+        data.cases.map(
+            item => `
+
+            <div class="card">
+
+                <span class="score">
+                    ${item.score}/100
+                </span>
+
+                <b>
+                    ${item.name}
+                    (${item.year})
+                </b>
+
+                <p class="muted">
+                    ${item.topic}
+                </p>
+
+                <p>
+
+                    ${item.hits
+                        .map(
+                            hit =>
+                            `<span class="tag">
+                                ${hit}
+                            </span>`
+                        )
+                        .join("")
+                    }
+
+                </p>
+
+                <a
+                    href="https://www.sci.gov.in/judgements-judge/"
+                    target="_blank"
+                    rel="noopener"
+                >
+                    Verify judgment ↗
+                </a>
+
+            </div>
+
+            `
+        )
+        .join("")
+
+        :
+
+        `
+        <div class="empty">
+            No local case lead matched.
+        </div>
+        `;
+
+
+    /* --------------------------------------------------------
+       EVIDENCE
+       -------------------------------------------------------- */
+
+    document
+        .getElementById("evidence")
+        .innerHTML =
+
+        data.evidence
+            .map(
+                item => `
+
+                <div class="card">
+
+                    <b>
+                        ${item[0]}
+                    </b>
+
+                    <div class="muted">
+
+                        ${
+                            item[1]
+
+                            ?
+
+                            "Potentially indicated by the input"
+
+                            :
+
+                            "Not established from the input"
+                        }
+
+                    </div>
+
+                </div>
+
+                `
+            )
+            .join("");
+
+
+    /* --------------------------------------------------------
+       QUESTIONS
+       -------------------------------------------------------- */
+
+    document
+        .getElementById("questions")
+        .innerHTML =
+
+        data.questions
+            .map(
+                (question,index) => `
+
+                <div class="card">
+
+                    <b>
+                        ${index + 1}.
+                    </b>
+
+                    ${question}
+
+                </div>
+
+                `
+            )
+            .join("");
+
+
+    /* --------------------------------------------------------
+       SUMMARY
+       -------------------------------------------------------- */
+
+    document
+        .getElementById("summary")
+        .innerHTML = `
+
+        <p>
+
+            <b>
+                Case ID:
+            </b>
+
+            ${data.case_id}
+
+        </p>
+
+
+        <p>
+
+            <b>
+                Generated:
+            </b>
+
+            ${data.generated}
+
+        </p>
+
+
+        <p>
+
+            <b>
+                Status:
+            </b>
+
+            HUMAN VERIFICATION REQUIRED
+
+        </p>
+
+
+        <div class="notice">
+
+            ${data.notice}
+
+        </div>
+
+        `;
+
+}
+
+
+/* ============================================================
+   RUN ANALYSIS
+   ============================================================ */
+
+function run(){
+
+    const problem =
+        document
+            .getElementById(
+                "problem"
+            )
+            .value
+            .trim();
+
+
+    const status =
+        document
+            .getElementById(
+                "status"
+            );
+
+
+    if(
+        problem.length < 30
+    ){
+
+        status.textContent =
+            "Enter at least 30 characters of factual detail.";
+
+        return;
+
+    }
+
+
+    status.textContent =
+        "Analyzing locally...";
+
+
+    try{
+
+        const result =
+            analyze(problem);
+
+
+        render(result);
+
+
+        status.textContent =
+            "Analysis complete • no server required";
+
+
+        document
+            .getElementById(
+                "results"
+            )
+            .scrollIntoView({
+
+                behavior:"smooth",
+
+                block:"start"
+
+            });
+
+    }
+
+    catch(error){
+
+        console.error(
+            error
+        );
+
+        status.textContent =
+            "Analysis failed. Please refresh the page and try again.";
+
+    }
+
+}
+
+
+/* ============================================================
+   DEMO
+   ============================================================ */
+
+function demo(){
+
+    document
+        .getElementById(
+            "problem"
+        )
+        .value =
+
+        "On 12/05/2025, a person paid ₹50,000 to a seller after receiving a false promise that a service would be delivered. The seller stopped responding on WhatsApp and refused a refund. The buyer has bank and message records.";
+
+    run();
+
+}
+
+
+/* ============================================================
+   CLEAR
+   ============================================================ */
+
+function clearAll(){
+
+    document
+        .getElementById(
+            "problem"
+        )
+        .value = "";
+
+
+    [
+        "laws",
+        "cases",
+        "evidence",
+        "questions",
+        "summary"
+    ]
+    .forEach(
+        id => {
+
+            document
+                .getElementById(
+                    id
+                )
+                .innerHTML =
+
+                `
+                <div class="empty">
+                    Run an analysis to see results.
+                </div>
+                `;
+
+        }
+    );
+
+
+    document
+        .getElementById(
+            "status"
+        )
+        .textContent = "";
+
+}
+
+
+/* ============================================================
+   SELF TEST
+   ============================================================ */
+
+function selfTest(){
+
+    const sample =
+        "On 12/05/2025, a seller took ₹50000 after a false promise. The seller stopped replying on WhatsApp and refused a refund. The buyer has bank records and messages.";
+
+
+    const result =
+        analyze(sample);
+
+
+    const passed =
+
+        result.case_id &&
+
+        result.laws.length > 0 &&
+
+        result.evidence.some(
+            item => item[1]
+        ) &&
+
+        result.questions.length > 0;
+
+
+    alert(
+
+        passed
+
+        ?
+
+        "LegalMind AI self-test: PASS"
+
+        :
+
+        "LegalMind AI self-test: FAIL"
+
+    );
+
+}
+
+
+/* ============================================================
+   CTRL + ENTER
+   ============================================================ */
+
+document
+    .getElementById(
+        "problem"
+    )
+    .addEventListener(
+        "keydown",
+        event => {
+
+            if(
+                (event.ctrlKey ||
+                 event.metaKey) &&
+
+                event.key === "Enter"
+            ){
+
+                event.preventDefault();
+
+                run();
+
+            }
+
+        }
+    );
+
+</script>
+
+
+</body>
+</html>
