@@ -1,0 +1,2950 @@
+
+import csv
+import json
+import re
+import sqlite3
+import webbrowser
+from tkinter import filedialog, messagebox
+from datetime import datetime, timezone
+from pathlib import Path
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import os
+import textwrap
+import math
+import secrets
+import urllib.error
+import difflib
+from collections import Counter
+import uuid
+import hashlib
+import html
+import shutil
+from tkinter import simpledialog
+import threading
+import urllib.parse
+import urllib.request
+
+
+APP = "LegalMind AI Pro"
+DB = "legalmind_pro.db"
+
+OFFICIAL_INDIA_CODE = "https://www.indiacode.nic.in/"
+OFFICIAL_SC_JUDGMENTS = "https://www.sci.gov.in/judgements-judge/"
+OFFICIAL_SC_SEARCH = "https://verdictfinder.sci.gov.in/elk_frontend/index.php"
+
+# IMPORTANT:
+# This is a legal-research prototype. A match means "potentially relevant",
+# not that an offence/claim is established. Always verify the current law,
+# amendments, commencement dates, jurisdiction and complete judgment.
+
+
+# -------------------- v13 Compatibility / Integrity Fix Layer --------------------
+LEGAL_SOURCE_RULES = {
+    "India Code": OFFICIAL_INDIA_CODE,
+    "Supreme Court": OFFICIAL_SC_JUDGMENTS,
+    "eCourts": "https://ecourts.gov.in/",
+}
+def normalize_text(s):
+    return re.sub(r"\s+", " ", (s or "")).strip()
+def now_utc():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+def make_case_fingerprint(problem):
+    return hashlib.sha256(normalize_text(problem).lower().encode("utf-8")).hexdigest()[:16].upper()
+def extract_legal_citations(text):
+    pat = re.compile(r"\b(?:Section|Sec\.?|S\.)\s*\d+[A-Za-z]?(?:\([^)]+\))?(?:\s+of\s+(?:the\s+)?[A-Z][A-Za-z&.\- ]+(?:Act|Code|Constitution|Rules))?", re.I)
+    return sorted(set(m.group(0).strip(" ,.;") for m in pat.finditer(text or "")))
+def extract_dates(text):
+    pat = re.compile(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4})\b", re.I)
+    return sorted(set(m.group(0) for m in pat.finditer(text or "")))
+def extract_roles(text):
+    roles = {"complainant","petitioner","respondent","accused","victim","witness","employer","employee","buyer","seller","tenant","landlord","borrower","lender","director","company","police","authority","consumer","defendant","plaintiff"}
+    low = (text or "").lower()
+    return sorted(r for r in roles if re.search(r"\b" + re.escape(r) + r"\b", low))
+def authority_status(source, verified=False):
+    if verified: return "VERIFIED BY USER / OFFICIAL SOURCE"
+    if source in LEGAL_SOURCE_RULES: return "OFFICIAL SOURCE AVAILABLE — NOT YET VERIFIED"
+    return "UNVERIFIED"
+def build_research_plan(problem, laws, cases):
+    p = [
+        ("Primary law","Verify current statutory text, definitions, commencement and amendments.",LEGAL_SOURCE_RULES["India Code"]),
+        ("Case law","Retrieve and read complete judgments before relying on case leads.",LEGAL_SOURCE_RULES["Supreme Court"]),
+        ("Procedure","Check jurisdiction, procedure and limitation/commencement.",LEGAL_SOURCE_RULES["eCourts"]),
+    ]
+    if extract_legal_citations(problem):
+        p.append(("User citations","Verify every cited provision exactly.",LEGAL_SOURCE_RULES["India Code"]))
+    if laws: p.append(("Elements","Map statutory ingredients to confirmed facts and evidence.",LEGAL_SOURCE_RULES["India Code"]))
+    if cases: p.append(("Precedent fit","Compare material facts, issue, posture and holding/ratio.",LEGAL_SOURCE_RULES["Supreme Court"]))
+    return p
+
+LAW_DB = [
+    dict(id="BNS-115", act="Bharatiya Nyaya Sanhita, 2023", section="Section 115",
+         title="Voluntarily causing hurt / related hurt offences",
+         tags=["hurt","injury","assault","beaten","beat","slap","punch","wound","physical harm"],
+         elements=["A physical act causing hurt must be established as required by the applicable provision.",
+                   "The required mental element and statutory conditions must be examined.",
+                   "Exact subsection and exceptions depend on the facts."],
+         why="Consider where the facts describe physical harm or an alleged act causing hurt.",
+         query="Bharatiya Nyaya Sanhita section 115 hurt"),
+    dict(id="BNS-303", act="Bharatiya Nyaya Sanhita, 2023", section="Section 303",
+         title="Theft",
+         tags=["theft","stole","stolen","taken","took","without permission","movable property"],
+         elements=["The property must fall within the statutory definition.",
+                   "There must be dishonest taking/moving as required by the provision.",
+                   "Possession, consent and intention need factual proof."],
+         why="Consider where movable property is alleged to have been dishonestly taken without consent.",
+         query="Bharatiya Nyaya Sanhita section 303 theft"),
+    dict(id="BNS-316", act="Bharatiya Nyaya Sanhita, 2023", section="Section 316",
+         title="Criminal breach of trust",
+         tags=["entrusted","entrustment","misappropriation","misappropriated","embezzled","breach of trust"],
+         elements=["There should be the legally relevant entrustment/dominion.",
+                   "The property must allegedly be misappropriated/converted or dealt with contrary to the legal direction.",
+                   "The required dishonest mental element must be assessed."],
+         why="Consider where property was entrusted and is alleged to have been dishonestly misappropriated.",
+         query="Bharatiya Nyaya Sanhita section 316 criminal breach of trust"),
+    dict(id="BNS-318", act="Bharatiya Nyaya Sanhita, 2023", section="Section 318",
+         title="Cheating",
+         tags=["cheat","cheated","cheating","fraud","deceived","deception","false promise",
+               "misrepresentation","scam","dishonest inducement"],
+         elements=["A deception must be identified.",
+                   "The required dishonest/fraudulent inducement must be examined.",
+                   "The resulting delivery/act/omission and causation need factual proof."],
+         why="Consider where deception allegedly induced a person to part with property or act/omit in a legally relevant way.",
+         query="Bharatiya Nyaya Sanhita section 318 cheating"),
+    dict(id="BNS-351", act="Bharatiya Nyaya Sanhita, 2023", section="Section 351",
+         title="Criminal intimidation",
+         tags=["threat","threatened","threatening","kill me","harm me","intimidate","blackmail"],
+         elements=["A threat of the type covered by the provision must be identified.",
+                   "The threatened consequence and surrounding circumstances matter.",
+                   "The statutory intent and other requirements must be checked."],
+         why="Consider where a person is alleged to have been threatened with legally relevant harm.",
+         query="Bharatiya Nyaya Sanhita section 351 criminal intimidation"),
+    dict(id="BNS-356", act="Bharatiya Nyaya Sanhita, 2023", section="Section 356",
+         title="Defamation",
+         tags=["defamation","defamed","reputation","false allegation","false accusation","published false"],
+         elements=["An imputation concerning a person must be identified.",
+                   "Publication/communication and the required mental element must be examined.",
+                   "Exceptions/defences and truth/public-good questions may be material."],
+         why="Consider where a statement is alleged to have harmed reputation and the statutory elements may be satisfied.",
+         query="Bharatiya Nyaya Sanhita section 356 defamation"),
+    dict(id="IT-66", act="Information Technology Act, 2000", section="Section 66",
+         title="Computer-related offences",
+         tags=["hacked","hack","unauthorized access","computer","password stolen","account hacked","system accessed"],
+         elements=["Identify the computer resource and exact conduct.",
+                   "Determine whether the conduct falls within the statutory offence and required mental element.",
+                   "Preserve logs, access records and original electronic evidence."],
+         why="Consider for alleged dishonest/fraudulent computer-related conduct; exact provision depends on facts.",
+         query="Information Technology Act section 66 computer related offences"),
+    dict(id="DPDP", act="Digital Personal Data Protection Act, 2023",
+         section="Applicable provisions depend on facts and provisions in force",
+         title="Digital personal data",
+         tags=["personal data","personal information","data leak","data breach","private information","customer data"],
+         elements=["Identify the personal data and processing/disclosure involved.",
+                   "Identify the relevant data fiduciary/processor relationship if applicable.",
+                   "Check commencement, rules and exemptions applicable to the facts."],
+         why="Consider when the dispute involves processing or disclosure of digital personal data.",
+         query="Digital Personal Data Protection Act 2023 India"),
+    dict(id="CPA-2019", act="Consumer Protection Act, 2019",
+         section="Applicable provisions depend on facts",
+         title="Consumer dispute / deficiency / unfair trade practice",
+         tags=["consumer","defective product","defective","service failed","refund","unfair trade",
+               "deficiency in service","seller","online purchase","wrong product"],
+         elements=["Establish the consumer/service transaction and relevant parties.",
+                   "Identify the alleged defect, deficiency or unfair trade practice.",
+                   "Identify the requested relief and supporting transaction evidence."],
+         why="Consider for disputes involving goods/services, deficiency or unfair trade practices.",
+         query="Consumer Protection Act 2019 India"),
+    dict(id="CONTRACT", act="Indian Contract Act, 1872",
+         section="Applicable provisions depend on contract and remedy",
+         title="Contract / breach",
+         tags=["contract","agreement","breach","failed to pay","non-payment","promise in contract","employment agreement"],
+         elements=["Identify the contract and legally relevant terms.",
+                   "Identify the alleged breach and any performance/termination facts.",
+                   "Check available contractual/statutory remedies and limitation."],
+         why="Consider when a contractual promise or alleged breach is central to the dispute.",
+         query="Indian Contract Act 1872 breach contract"),
+]
+
+CASE_DB = [
+    dict(name="Lalita Kumari v. Government of Uttar Pradesh", year="2013",
+         court="Supreme Court of India", tags=["fir","police","cognizable","criminal"],
+         summary="Important Supreme Court decision concerning registration of information relating to cognizable offences, subject to the principles and qualifications stated by the Court.",
+         query="Lalita Kumari Government of Uttar Pradesh 2013"),
+    dict(name="Arnesh Kumar v. State of Bihar", year="2014",
+         court="Supreme Court of India", tags=["arrest","criminal procedure","police","notice"],
+         summary="Important decision concerning safeguards around arrest and statutory compliance in appropriate cases.",
+         query="Arnesh Kumar State of Bihar 2014"),
+    dict(name="State of Haryana v. Bhajan Lal", year="1992",
+         court="Supreme Court of India", tags=["criminal","fir","quashing","abuse of process"],
+         summary="Frequently cited for categories concerning exercise of inherent/high constitutional powers in criminal proceedings and FIRs.",
+         query="State of Haryana v Bhajan Lal 1992"),
+    dict(name="K.S. Puttaswamy v. Union of India", year="2017",
+         court="Supreme Court of India", tags=["privacy","personal data","fundamental rights"],
+         summary="Constitution Bench decision recognizing privacy as a constitutionally protected right and discussing informational privacy.",
+         query="K S Puttaswamy Union of India 2017"),
+    dict(name="Indian Medical Association v. V.P. Shantha", year="1995",
+         court="Supreme Court of India", tags=["consumer","deficiency","services"],
+         summary="Important consumer-law decision concerning the scope of consumer protection in relation to medical services and deficiency in service.",
+         query="Indian Medical Association v VP Shantha 1995"),
+]
+
+def norm(s):
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", s.lower())).strip()
+
+def hit_terms(text, terms):
+    p = norm(text)
+    return [t for t in terms if t in p]
+
+def score_law(text, law):
+    hits = hit_terms(text, law["tags"])
+    # Simple transparent research score, NOT probability of liability.
+    score = min(100, 20 + len(hits) * 18)
+    return score, hits
+
+def analyze_laws(text):
+    rows=[]
+    for law in LAW_DB:
+        score,hits=score_law(text,law)
+        if hits:
+            rows.append((score,hits,law))
+    return sorted(rows,key=lambda x:x[0],reverse=True)
+
+def analyze_cases(text):
+    p=norm(text)
+    rows=[]
+    for case in CASE_DB:
+        hits=[t for t in case["tags"] if t in p]
+        if hits:
+            rows.append((len(hits),hits,case))
+    return sorted(rows,key=lambda x:x[0],reverse=True)
+
+def facts_and_questions(text):
+    p=norm(text)
+    q=[]
+    if not re.search(r"\b(when|on \d|date|month|year|yesterday|today)\b",p):
+        q.append("What is the exact date or date range of the incident?")
+    if not re.search(r"\b(where|at|in|near|office|home|police station|court)\b",p):
+        q.append("Where did the incident occur?")
+    if not re.search(r"\b(who|person|accused|defendant|company|employer|seller)\b",p):
+        q.append("Who are the people/entities involved and what was each person's role?")
+    if any(x in p for x in ["money","payment","paid","loan","transaction","refund"]):
+        q.append("What amount was involved and what records prove the payment or promise?")
+    if any(x in p for x in ["whatsapp","email","message","instagram","online","account","hacked","data"]):
+        q.append("Do you have the original digital evidence, timestamps, URLs, account logs or device records?")
+    if any(x in p for x in ["injury","beaten","hit","assault","wound"]):
+        q.append("Is there a medical report, photograph, CCTV or independent witness evidence?")
+    q += [
+        "Was there a contract, written promise, invoice, notice or other document connected to the dispute?",
+        "Are there witnesses who directly saw or heard the relevant event?",
+        "Has a complaint/FIR/case already been filed? If yes, what section and court/police station?",
+        "Is there any connected act that occurred before or after the main incident?",
+        "Could any fact support an alternative explanation or defence?"
+    ]
+    return q
+
+def counter_arguments(text, laws):
+    p=norm(text)
+    out=[
+        "The accused/defendant may dispute one or more factual allegations; identify exactly which facts are independently provable.",
+        "A legal provision may require a particular mental element, causation, entrustment, publication, consent issue or other element that must be separately established.",
+        "Check whether an exception, defence, contractual term, statutory exemption or procedural requirement changes the analysis."
+    ]
+    if any(l["id"]=="BNS-318" for _,_,l in laws):
+        out.append("For an alleged cheating theory, distinguish a dishonest intention existing at the relevant time from a later failure to perform a promise.")
+    if any(l["id"]=="BNS-356" for _,_,l in laws):
+        out.append("For alleged defamation, examine publication, identification, intent/knowledge and statutory exceptions.")
+    if any(l["id"]=="IT-66" for _,_,l in laws):
+        out.append("For a cyber allegation, identify the exact technical act and preserve original logs rather than relying only on screenshots.")
+    return out
+
+def timeline(text):
+    dates=re.findall(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})\b",
+                     text,flags=re.I)
+    return dates
+
+def save_db(title, problem, result):
+    con=sqlite3.connect(DB)
+    con.execute("""CREATE TABLE IF NOT EXISTS analyses(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL,
+        title TEXT NOT NULL,
+        problem TEXT NOT NULL,
+        result TEXT NOT NULL)""")
+    con.execute("INSERT INTO analyses(created_at,title,problem,result) VALUES(?,?,?,?)",
+                (datetime.now().isoformat(timespec="seconds"),title,problem,json.dumps(result,ensure_ascii=False)))
+    con.commit(); con.close()
+
+
+
+def extract_text_file(path):
+    """Read common text-like legal documents without external packages."""
+    ext = Path(path).suffix.lower()
+    if ext in {".txt", ".md", ".csv", ".json", ".py"}:
+        return Path(path).read_text(encoding="utf-8", errors="ignore")
+    if ext == ".docx":
+        try:
+            from docx import Document
+            doc = Document(path)
+            return "\n".join(p.text for p in doc.paragraphs)
+        except Exception as e:
+            raise RuntimeError("DOCX support requires python-docx.") from e
+    if ext == ".pdf":
+        try:
+            from pypdf import PdfReader
+            r = PdfReader(path)
+            return "\n".join((p.extract_text() or "") for p in r.pages)
+        except Exception as e:
+            raise RuntimeError("PDF support requires pypdf.") from e
+    raise RuntimeError("Supported formats: TXT, MD, CSV, JSON, DOCX and PDF.")
+
+def redact_basic_pii(text):
+    """Optional local redaction of obvious emails/phone numbers."""
+    text = re.sub(r'[\w\.-]+@[\w\.-]+\.\w+', '[EMAIL REDACTED]', text)
+    text = re.sub(r'\b(?:\+91[-\s]?)?[6-9]\d{9}\b', '[PHONE REDACTED]', text)
+    return text
+
+def issue_priority(score):
+    if score >= 70:
+        return "HIGH"
+    if score >= 45:
+        return "MEDIUM"
+    return "LOW"
+
+def limitation_check(text):
+    p = norm(text)
+    signals = []
+    if re.search(r"\b\d{4}\b", p):
+        signals.append("A year is present; check applicable limitation/commencement rules.")
+    else:
+        signals.append("Exact incident date is missing; limitation analysis cannot be meaningfully assessed.")
+    signals.append("Verify the law and procedural rules in force on the incident date.")
+    return signals
+
+def generate_case_questions(problem, laws):
+    questions = []
+    if laws:
+        for _, _, law in laws[:5]:
+            questions.append(f"What facts prove each element of {law['section']} ({law['title']})?")
+    questions += [
+        "What evidence independently proves the most important disputed fact?",
+        "What fact, if false, would materially change the legal analysis?",
+        "What is the strongest plausible argument for the opposing side?",
+        "Are there any parallel civil, criminal, consumer, contractual, constitutional or regulatory remedies?",
+        "Is there a limitation, jurisdiction, forum, maintainability or procedural issue?"
+    ]
+    return list(dict.fromkeys(questions))
+
+def make_case_id(problem):
+    return hashlib.sha256(problem.encode("utf-8")).hexdigest()[:12].upper()
+
+
+
+
+
+def detect_contradictions(problem):
+    """Find simple direct contradictions for manual review; not a legal finding."""
+    sentences=split_sentences(problem)
+    findings=[]
+    pairs=[
+        (r"\bnot\b.*\bpaid\b", r"\bpaid\b"),
+        (r"\bdid not\b.*\bmeet\b", r"\bmet\b"),
+        (r"\bnever\b", r"\bsaid\b|\bcalled\b|\bmet\b"),
+        (r"\bno\b.*\bcontract\b", r"\bcontract\b|\bagreement\b"),
+        (r"\bno\b.*\bwitness\b", r"\bwitness\b|\bsaw\b|\bheard\b"),
+    ]
+    for i,a in enumerate(sentences):
+        for j,b in enumerate(sentences[i+1:],i+1):
+            for pa,pb in pairs:
+                if (re.search(pa,norm(a)) and re.search(pb,norm(b))) or \
+                   (re.search(pb,norm(a)) and re.search(pa,norm(b))):
+                    findings.append((i+1,j+1,a,b))
+                    break
+    return findings[:20]
+
+def build_element_checklist(laws):
+    rows=[]
+    for _,_,law in laws:
+        for e in law["elements"]:
+            rows.append({
+                "law":f"{law['act']} — {law['section']}",
+                "element":e,
+                "status":"NOT VERIFIED",
+                "evidence":"Add evidence or legal authority"
+            })
+    return rows
+
+def build_case_theories(problem,laws):
+    theories=[]
+    for score,hits,law in laws:
+        theories.append({
+            "theory":law["title"],
+            "provision":f"{law['act']} — {law['section']}",
+            "supporting_signals":hits,
+            "research_relevance":score,
+            "status":"POTENTIAL — VERIFY"
+        })
+    return theories
+
+def verification_gate(result):
+    checks=[
+        ("Current statute verified",False),
+        ("Jurisdiction verified",False),
+        ("Limitation/commencement checked",False),
+        ("Case citation and full judgment verified",False),
+        ("Every material element mapped to evidence",False),
+        ("Opposing arguments reviewed",False),
+        ("Qualified human review completed",False),
+    ]
+    return checks
+
+
+def words(text):
+    return re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", norm(text))
+
+def tfidf_similarity(a, b):
+    """Small dependency-free cosine similarity for local document/case retrieval."""
+    wa, wb = words(a), words(b)
+    if not wa or not wb:
+        return 0.0
+    da, db = {}, {}
+    for w in wa: da[w] = da.get(w, 0) + 1
+    for w in wb: db[w] = db.get(w, 0) + 1
+    vocab = set(da) | set(db)
+    dot = sum(da.get(w, 0) * db.get(w, 0) for w in vocab)
+    na = math.sqrt(sum(v*v for v in da.values()))
+    nb = math.sqrt(sum(v*v for v in db.values()))
+    return (dot / (na * nb) * 100) if na and nb else 0.0
+
+def semantic_case_leads(problem):
+    rows=[]
+    for case in CASE_DB:
+        text = " ".join([
+            case["name"], case["court"], " ".join(case["tags"]), case["summary"]
+        ])
+        sim = tfidf_similarity(problem, text)
+        if sim > 0:
+            rows.append((sim, case))
+    return sorted(rows, key=lambda x:x[0], reverse=True)
+
+def create_documents_db():
+    con=sqlite3.connect(DB)
+    con.execute("""CREATE TABLE IF NOT EXISTS documents(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL,
+        name TEXT NOT NULL,
+        path TEXT,
+        content TEXT NOT NULL,
+        sha256 TEXT NOT NULL
+    )""")
+    con.commit(); con.close()
+
+def index_document(name, path, content):
+    create_documents_db()
+    digest=hashlib.sha256(content.encode("utf-8")).hexdigest()
+    con=sqlite3.connect(DB)
+    con.execute("INSERT INTO documents(created_at,name,path,content,sha256) VALUES(?,?,?,?,?)",
+                (datetime.now().isoformat(timespec="seconds"),name,path,content,digest))
+    con.commit(); con.close()
+    return digest
+
+def search_index(problem, limit=10):
+    create_documents_db()
+    con=sqlite3.connect(DB)
+    rows=con.execute("SELECT name,path,content,sha256 FROM documents").fetchall()
+    con.close()
+    scored=[]
+    for name,path,content,digest in rows:
+        score=tfidf_similarity(problem, content)
+        if score > 0:
+            scored.append((score,name,path,digest,content))
+    return sorted(scored,key=lambda x:x[0],reverse=True)[:limit]
+
+def build_authority_record(law):
+    return {
+        "type":"statute",
+        "name":law["act"],
+        "section":law["section"],
+        "title":law["title"],
+        "official_source":OFFICIAL_INDIA_CODE,
+        "verification":"REQUIRED"
+    }
+
+def build_case_record(case, similarity=None):
+    return {
+        "type":"judgment",
+        "name":case["name"],
+        "year":case["year"],
+        "court":case["court"],
+        "official_search":OFFICIAL_SC_SEARCH,
+        "similarity_research_score":round(similarity,2) if similarity is not None else None,
+        "verification":"REQUIRED"
+    }
+
+def risk_flags(problem):
+    p=norm(problem)
+    flags=[]
+    if any(x in p for x in ["child","minor","sexual","rape","abuse"]):
+        flags.append("Potentially sensitive/high-stakes matter: obtain qualified legal assistance and protect identities.")
+    if any(x in p for x in ["arrest","custody","jail","detained"]):
+        flags.append("Potential liberty/custody issue: procedural timing may be important.")
+    if any(x in p for x in ["deadline","notice","limitation","years ago"]):
+        flags.append("Potential time-limit issue: verify limitation and commencement rules.")
+    if any(x in p for x in ["court order","injunction","stay","contempt"]):
+        flags.append("Potential court-order issue: preserve the exact order and compliance timeline.")
+    return flags
+
+
+def split_sentences(text):
+    return [s.strip() for s in re.split(r'(?<=[.!?])\s+|\n+', text) if s.strip()]
+
+def extract_entities(problem):
+    """Lightweight local extraction; never claims these are legally verified facts."""
+    text = problem
+    people = re.findall(r'\b(?:Mr\.|Ms\.|Mrs\.|Dr\.)\s+[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,2}', text)
+    money = re.findall(r'(?:₹|Rs\.?|INR)\s?[\d,]+(?:\.\d+)?', text, flags=re.I)
+    emails = re.findall(r'[\w\.-]+@[\w\.-]+\.\w+', text)
+    phones = re.findall(r'\b(?:\+91[-\s]?)?[6-9]\d{9}\b', text)
+    return {
+        "people_or_named_persons": list(dict.fromkeys(people)),
+        "money_mentions": list(dict.fromkeys(money)),
+        "emails": list(dict.fromkeys(emails)),
+        "phones": list(dict.fromkeys(phones)),
+        "dates": timeline(text),
+        "sentences": split_sentences(text)
+    }
+
+def fact_classification(problem):
+    """Classify sentences as allegation/fact/unknown based on cautious lexical signals."""
+    rows=[]
+    for s in split_sentences(problem):
+        p=norm(s)
+        if any(x in p for x in ["alleged", "claims", "claimed", "accused", "reportedly"]):
+            label="ALLEGATION / CLAIM"
+        elif any(x in p for x in ["may", "might", "possibly", "perhaps", "think", "believe"]):
+            label="UNCERTAIN"
+        else:
+            label="FACT AS PROVIDED"
+        rows.append((label,s))
+    return rows
+
+def source_links_for_law(law):
+    q=urllib.parse.quote(law["query"])
+    return {
+        "india_code": OFFICIAL_INDIA_CODE,
+        "search_query": f"https://www.google.com/search?q={q}+site%3Aindiacode.nic.in"
+    }
+
+def source_links_for_case(case):
+    q=urllib.parse.quote(case["query"])
+    return {
+        "supreme_court": OFFICIAL_SC_SEARCH,
+        "search_query": f"https://www.google.com/search?q={q}+site%3Asci.gov.in"
+    }
+
+def confidence_note():
+    return (
+        "No numerical confidence is assigned to legal liability. "
+        "The application's scores measure textual/research relevance only."
+    )
+
+def create_audit_db():
+    con=sqlite3.connect(DB)
+    con.execute("""CREATE TABLE IF NOT EXISTS audit_log(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL,
+        action TEXT NOT NULL,
+        case_id TEXT,
+        details TEXT
+    )""")
+    con.commit(); con.close()
+
+def audit(action, case_id="", details=""):
+    create_audit_db()
+    con=sqlite3.connect(DB)
+    con.execute("INSERT INTO audit_log(created_at,action,case_id,details) VALUES(?,?,?,?)",
+                (datetime.now().isoformat(timespec="seconds"),action,case_id,details))
+    con.commit(); con.close()
+
+
+def build_search_queries(problem, laws, cases):
+    p = norm(problem)
+    queries = []
+    if laws:
+        for _, _, law in laws[:6]:
+            queries.append(f"{law['act']} {law['section']} {law['title']}")
+    if cases:
+        for _, _, case in cases[:6]:
+            queries.append(f"{case['name']} {case['year']}")
+    # Generic issue queries improve discovery when local rules do not match.
+    for term in ["ingredients elements", "judgment legal issue", "limitation procedure"]:
+        if term not in p:
+            queries.append(f"{term} {problem[:120]}")
+    return list(dict.fromkeys(queries))
+
+def build_issue_matrix(problem, laws):
+    rows = []
+    for score, hits, law in laws:
+        rows.append({
+            "issue": law["title"],
+            "law": f"{law['act']} — {law['section']}",
+            "relevance": score,
+            "facts": ", ".join(hits),
+            "verify": "Verify every statutory element, exception and current amendment."
+        })
+    if not rows:
+        rows.append({
+            "issue": "Unmapped legal issue",
+            "law": "No local match",
+            "relevance": 0,
+            "facts": "Requires broader legal research",
+            "verify": "Search official sources using the facts and legal issues."
+        })
+    return rows
+
+def evidence_map(problem, laws):
+    p = norm(problem)
+    items = []
+    checks = [
+        ("Identity / relationship", "party", ["employer","employee","seller","buyer","husband","wife","tenant","landlord"]),
+        ("Communication evidence", "digital", ["whatsapp","email","message","call","instagram","online","sms"]),
+        ("Financial evidence", "financial", ["money","payment","paid","loan","transaction","refund","bank","upi"]),
+        ("Physical evidence", "physical", ["injury","beaten","hit","damage","broken","assault"]),
+        ("Documentary evidence", "document", ["contract","agreement","invoice","notice","receipt","document"]),
+        ("Witness evidence", "witness", ["witness","saw","heard","present"]),
+    ]
+    for label, kind, words in checks:
+        found = [w for w in words if w in p]
+        items.append((label, "Potentially relevant" if found else "Not established from input",
+                      ", ".join(found) if found else "No matching fact detected"))
+    return items
+
+def generate_legal_brief(problem, laws, cases, questions, counters, jurisdiction, role):
+    now = datetime.now().strftime("%d %B %Y, %I:%M %p")
+    lines = [
+        "LEGALMIND AI PRO — PRELIMINARY LEGAL RESEARCH BRIEF",
+        "=" * 78,
+        f"Generated: {now}",
+        f"Jurisdiction selected: {jurisdiction}",
+        f"User role: {role}",
+        "",
+        "1. FACTUAL STATEMENT",
+        problem,
+        "",
+        "2. POTENTIALLY RELEVANT LAW",
+    ]
+    for score, hits, law in laws:
+        lines += [
+            f"- {law['act']} — {law['section']}: {law['title']}",
+            f"  Research relevance: {score}/100 (textual relevance, not probability)",
+            f"  Trigger facts: {', '.join(hits)}",
+            f"  Why: {law['why']}",
+        ]
+    if not laws:
+        lines.append("- No local database match. Broader official-source research required.")
+    lines += ["", "3. PRECEDENT RESEARCH LEADS"]
+    for score, hits, case in cases:
+        lines += [f"- {case['name']} ({case['year']}) — {case['court']}",
+                  f"  Issue tags: {', '.join(hits)}", f"  {case['summary']}"]
+    if not cases:
+        lines.append("- No local case lead matched.")
+    lines += ["", "4. MISSING FACTS / QUESTIONS"]
+    for i, q in enumerate(questions, 1):
+        lines.append(f"{i}. {q}")
+    lines += ["", "5. COUNTER-ANALYSIS"]
+    for c in counters:
+        lines.append(f"- {c}")
+    lines += [
+        "",
+        "6. VERIFICATION NOTICE",
+        "This brief is a research aid. It does not establish that an offence, violation,",
+        "liability or defence exists. Verify current legislation, commencement, amendments,",
+        "jurisdiction, procedural rules and complete judgments using authoritative sources."
+    ]
+    return "\n".join(lines)
+
+
+# -------------------- v6 Case Intelligence Layer --------------------
+def classify_fact_status(sentence):
+    s = normalize_text(sentence)
+    low = s.lower()
+    if any(x in low for x in ["alleged", "alleges", "claims", "according to", "reportedly", "said that"]):
+        return "ALLEGATION / ATTRIBUTED"
+    if any(x in low for x in ["disputed", "denies", "denied", "not true", "incorrect"]):
+        return "DISPUTED"
+    if any(x in low for x in ["unknown", "unclear", "not known", "not sure", "cannot confirm"]):
+        return "UNKNOWN"
+    return "STATED FACT — VERIFY"
+
+def build_fact_ledger(problem):
+    sentences = [normalize_text(x) for x in re.split(r"(?<=[.!?])\s+", problem or "") if normalize_text(x)]
+    ledger = []
+    for i, s in enumerate(sentences, 1):
+        ledger.append({
+            "id": f"F{i:03d}",
+            "statement": s,
+            "status": classify_fact_status(s),
+            "dates": extract_dates(s),
+            "roles": extract_roles(s),
+            "citations": extract_legal_citations(s),
+        })
+    return ledger
+
+def build_citation_ledger(problem, laws=None, cases=None):
+    laws = laws or []
+    cases = cases or []
+    rows = []
+    for c in extract_legal_citations(problem):
+        rows.append({
+            "authority": c,
+            "type": "USER-CITED PROVISION",
+            "source": "India Code",
+            "status": authority_status("India Code"),
+            "verification_action": "Open current official text and verify section, definitions, commencement and amendments."
+        })
+    for law in laws:
+        name = law.get("name", law.get("title", str(law))) if isinstance(law, dict) else str(law)
+        rows.append({
+            "authority": name,
+            "type": "CANDIDATE LAW",
+            "source": "India Code",
+            "status": authority_status("India Code"),
+            "verification_action": "Confirm that all statutory elements match the confirmed facts."
+        })
+    for case in cases:
+        name = case.get("name", case.get("title", str(case))) if isinstance(case, dict) else str(case)
+        rows.append({
+            "authority": name,
+            "type": "CASE LEAD",
+            "source": "Supreme Court",
+            "status": authority_status("Supreme Court"),
+            "verification_action": "Read the complete judgment and verify the holding/ratio and factual fit."
+        })
+    # Deduplicate by authority + type.
+    seen, out = set(), []
+    for row in rows:
+        key = (row["authority"], row["type"])
+        if key not in seen:
+            seen.add(key)
+            out.append(row)
+    return out
+
+def calculate_case_coverage(problem, laws=None):
+    laws = laws or []
+    facts = build_fact_ledger(problem)
+    fact_count = len(facts)
+    citation_count = len(extract_legal_citations(problem))
+    law_count = len(laws)
+    return {
+        "fact_count": fact_count,
+        "candidate_law_count": law_count,
+        "user_citation_count": citation_count,
+        "date_count": len(extract_dates(problem)),
+        "role_count": len(extract_roles(problem)),
+        "coverage_note": (
+            "Coverage counts describe extracted material only; they are not probabilities, "
+            "confidence in guilt/liability, or predictions of case outcome."
+        ),
+    }
+
+def build_counter_questions(problem, laws=None):
+    low = (problem or "").lower()
+    qs = [
+        "What fact, if disproved, would most change the legal analysis?",
+        "Which material fact is supported by a document, recording, witness, or other independent evidence?",
+        "Is there an innocent or non-liability explanation consistent with the stated facts?",
+        "Are any dates, identities, amounts, locations, or communications uncertain or disputed?",
+        "Which statutory element currently has the weakest factual support?",
+        "Could a procedural, jurisdictional, limitation, or contractual issue change the route of the matter?",
+    ]
+    if "contract" in low or "agreement" in low:
+        qs.append("What exact contractual term, breach, notice, cure period, or termination provision is relied upon?")
+    if any(x in low for x in ["money", "payment", "loan", "amount", "refund"]):
+        qs.append("What records establish the amount, payment trail, demand, and response?")
+    return qs
+
+def build_source_registry():
+    return [
+        {"name": "India Code", "url": LEGAL_SOURCE_RULES["India Code"], "purpose": "Current central legislation and statutory text"},
+        {"name": "Supreme Court of India", "url": LEGAL_SOURCE_RULES["Supreme Court"], "purpose": "Judgments and court materials"},
+        {"name": "eCourts", "url": LEGAL_SOURCE_RULES["eCourts"], "purpose": "Court-services and procedural research"},
+    ]
+
+def build_v6_case_pack(problem, laws=None, cases=None):
+    laws, cases = laws or [], cases or []
+    return {
+        "case_fingerprint": make_case_fingerprint(problem),
+        "generated_at_utc": now_utc(),
+        "fact_ledger": build_fact_ledger(problem),
+        "coverage": calculate_case_coverage(problem, laws),
+        "citation_ledger": build_citation_ledger(problem, laws, cases),
+        "counter_questions": build_counter_questions(problem, laws),
+        "source_registry": build_source_registry(),
+        "research_plan": build_research_plan(problem, laws, cases),
+        "verification_gate": {
+            "status": "BLOCKED UNTIL HUMAN VERIFICATION",
+            "checks": [
+                "Current statute and commencement verified",
+                "Relevant definitions and exceptions checked",
+                "Complete judgment reviewed",
+                "Jurisdiction and procedure checked",
+                "Limitation/date issues checked",
+                "Evidence mapped to each material element",
+                "Conflicting facts identified and reviewed",
+            ],
+        },
+    }
+
+
+LEGALMIND_VERSION = "13.1"
+# LEGALMIND_V7 — Case Workspace + AI Gateway + Verification Workflow
+# -------------------- v7 Case Workspace & AI Gateway --------------------
+V7_DB_SCHEMA = {
+    "issues": """
+        CREATE TABLE IF NOT EXISTS case_issues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id TEXT NOT NULL,
+            issue TEXT NOT NULL,
+            status TEXT DEFAULT 'OPEN',
+            created_at TEXT NOT NULL
+        )
+    """,
+    "evidence": """
+        CREATE TABLE IF NOT EXISTS case_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id TEXT NOT NULL,
+            item TEXT NOT NULL,
+            source TEXT DEFAULT '',
+            linked_issue TEXT DEFAULT '',
+            status TEXT DEFAULT 'NOT_REVIEWED',
+            notes TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """,
+    "actions": """
+        CREATE TABLE IF NOT EXISTS case_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            owner TEXT DEFAULT '',
+            due_date TEXT DEFAULT '',
+            status TEXT DEFAULT 'OPEN',
+            created_at TEXT NOT NULL
+        )
+    """,
+    "authorities": """
+        CREATE TABLE IF NOT EXISTS authority_ledger (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id TEXT NOT NULL,
+            authority TEXT NOT NULL,
+            source_url TEXT DEFAULT '',
+            citation TEXT DEFAULT '',
+            verification TEXT DEFAULT 'UNVERIFIED',
+            notes TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """,
+}
+
+def v7_db_init(conn, case_id):
+    for sql in V7_DB_SCHEMA.values():
+        conn.execute(sql)
+    conn.commit()
+
+def v7_case_id(problem):
+    return "LM-" + make_case_fingerprint(problem)
+
+def v7_issue_candidates(problem):
+    low = (problem or "").lower()
+    out = []
+    if any(x in low for x in ["payment", "money", "refund", "loan", "amount"]):
+        out.append("Payment / monetary dispute")
+    if any(x in low for x in ["promise", "false", "misrepresentation", "cheat", "deceiv"]):
+        out.append("Possible misrepresentation / deception issue")
+    if any(x in low for x in ["contract", "agreement", "breach", "terms"]):
+        out.append("Contract formation / performance / breach")
+    if any(x in low for x in ["threat", "intimidat", "blackmail"]):
+        out.append("Threat / intimidation issue")
+    if any(x in low for x in ["data", "privacy", "personal information", "computer", "account", "hack"]):
+        out.append("Technology / privacy / cyber issue")
+    if any(x in low for x in ["injury", "hurt", "assault", "attack"]):
+        out.append("Personal harm / injury issue")
+    if not out:
+        out.append("General legal issue requiring fact-specific classification")
+    return out
+
+def v7_evidence_suggestions(problem):
+    low = (problem or "").lower()
+    items = [
+        "Chronology of material events",
+        "Relevant contracts / agreements / notices",
+        "Messages, emails or other communications",
+        "Payment / transaction records where applicable",
+        "Identity and contact records for relevant parties",
+        "Witness names and what each witness can establish",
+    ]
+    if any(x in low for x in ["online", "computer", "phone", "message", "email", "account"]):
+        items += ["Original digital files", "Metadata / platform records", "Screenshots with surrounding context"]
+    if any(x in low for x in ["injury", "medical", "hospital"]):
+        items += ["Medical records / bills / reports"]
+    return items
+
+def v7_action_suggestions(problem):
+    return [
+        "Verify every candidate statute against the current official text.",
+        "Retrieve and read the complete judgments before relying on case leads.",
+        "Separate confirmed facts from allegations and disputed facts.",
+        "Map each material legal element to supporting evidence.",
+        "Check jurisdiction, limitation, commencement and procedural requirements.",
+        "Record unresolved questions before preparing any filing or client communication.",
+    ]
+
+def build_case_workspace(problem, laws=None, cases=None):
+    cid = v7_case_id(problem)
+    issues = v7_issue_candidates(problem)
+    evidence = v7_evidence_suggestions(problem)
+    actions = v7_action_suggestions(problem)
+    authorities = build_citation_ledger(problem, laws or [], cases or [])
+    return {
+        "case_id": cid,
+        "created_at": now_utc(),
+        "issues": [{"issue": x, "status": "OPEN"} for x in issues],
+        "evidence": [{"item": x, "status": "NOT_REVIEWED"} for x in evidence],
+        "actions": [{"action": x, "status": "OPEN"} for x in actions],
+        "authorities": authorities,
+        "fact_ledger": build_fact_ledger(problem),
+        "research_plan": build_research_plan(problem, laws or [], cases or []),
+        "verification_status": "HUMAN VERIFICATION REQUIRED",
+    }
+
+def v7_local_ai_prompt(problem, instruction):
+    # Provider-neutral prompt builder. It deliberately does not pretend to be
+    # an external AI call; the UI can hand this prompt to a configured provider.
+    return (
+        "SYSTEM ROLE: Legal research assistant for Indian-law research.\n"
+        "RULES: Never invent authorities. Distinguish facts, allegations, disputed facts and unknowns. "
+        "Do not conclude that a person violated a law from text matching alone. "
+        "Use only retrieved/verified authorities for citations. Flag uncertainty.\n\n"
+        f"USER INSTRUCTION:\n{instruction}\n\n"
+        f"CASE FACTS:\n{problem}\n"
+    )
+
+def v7_provider_status():
+    provider = os.environ.get("LEGALMIND_AI_PROVIDER", "LOCAL / NOT CONNECTED")
+    key_present = bool(os.environ.get("LEGALMIND_AI_API_KEY"))
+    return {
+        "provider": provider,
+        "api_key_configured": key_present,
+        "mode": "CONNECTED" if key_present else "RESEARCH UI / PROVIDER NOT CONNECTED",
+    }
+
+def v7_diff_summary(old_text, new_text):
+    old = normalize_text(old_text).split()
+    new = normalize_text(new_text).split()
+    ratio = difflib.SequenceMatcher(a=old, b=new).ratio()
+    return {
+        "text_similarity": round(ratio, 3),
+        "old_word_count": len(old),
+        "new_word_count": len(new),
+        "changed": old != new,
+        "note": "This is a text-change metric, not a legal-confidence or outcome score.",
+    }
+
+
+# -------------------- v8 Research Workbench --------------------
+V8_SCHEMA = {
+    "matters": """
+        CREATE TABLE IF NOT EXISTS matters (
+            case_id TEXT PRIMARY KEY,
+            title TEXT DEFAULT '',
+            client_reference TEXT DEFAULT '',
+            court TEXT DEFAULT '',
+            jurisdiction TEXT DEFAULT '',
+            police_station TEXT DEFAULT '',
+            case_number TEXT DEFAULT '',
+            stage TEXT DEFAULT 'RESEARCH',
+            tags TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """,
+    "sources": """
+        CREATE TABLE IF NOT EXISTS research_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            source_type TEXT DEFAULT 'OTHER',
+            url TEXT DEFAULT '',
+            court TEXT DEFAULT '',
+            date TEXT DEFAULT '',
+            page_or_para TEXT DEFAULT '',
+            verification TEXT DEFAULT 'UNVERIFIED',
+            notes TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """,
+    "questions": """
+        CREATE TABLE IF NOT EXISTS interview_questions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id TEXT NOT NULL,
+            question TEXT NOT NULL,
+            answer TEXT DEFAULT '',
+            status TEXT DEFAULT 'OPEN',
+            created_at TEXT NOT NULL,
+            answered_at TEXT DEFAULT ''
+        )
+    """,
+    "versions": """
+        CREATE TABLE IF NOT EXISTS analysis_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id TEXT NOT NULL,
+            version_no INTEGER NOT NULL,
+            summary TEXT DEFAULT '',
+            analysis_json TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """,
+}
+
+V8_STAGES = [
+    "INTAKE", "FACT REVIEW", "RESEARCH", "EVIDENCE REVIEW",
+    "DRAFTING", "REVIEW", "CLOSED"
+]
+
+def v8_db_init(conn):
+    for sql in V8_SCHEMA.values():
+        conn.execute(sql)
+    conn.commit()
+
+def v8_new_case_id(problem):
+    return "LM-" + make_case_fingerprint(problem)
+
+def v8_interview_questions(problem):
+    facts = build_fact_ledger(problem)
+    questions = []
+    if not facts:
+        return ["What happened, in chronological order, and who was involved?"]
+    questions.append("Which statement in the fact ledger is confirmed by an independent document or witness?")
+    questions.append("Which important fact is alleged or disputed rather than independently confirmed?")
+    questions.append("What happened immediately before the first legally significant event?")
+    questions.append("What happened immediately after it?")
+    questions.append("What exact loss, harm, obligation, or relief is being claimed?")
+    questions.append("What response or explanation has the other side provided?")
+    questions.append("What document, message, recording, transaction record, or witness could contradict the current account?")
+    questions.append("Is there any relevant date, location, identity, amount, notice, agreement, or deadline still unknown?")
+    return questions
+
+def v8_source_row(title, source_type="OTHER", url="", court="", date="", page_or_para="", verification="UNVERIFIED", notes=""):
+    return {
+        "title": title,
+        "source_type": source_type,
+        "url": url,
+        "court": court,
+        "date": date,
+        "page_or_para": page_or_para,
+        "verification": verification,
+        "notes": notes,
+        "created_at": now_utc(),
+    }
+
+def v8_validate_authority(source):
+    url = (source.get("url") or "").lower()
+    if not url:
+        return "UNVERIFIED — NO SOURCE URL"
+    official_domains = ("indiacode.nic.in", "sci.gov.in", "ecourts.gov.in")
+    if any(d in url for d in official_domains):
+        return "OFFICIAL SOURCE DOMAIN — HUMAN CHECK REQUIRED"
+    return "NON-OFFICIAL SOURCE — HUMAN CHECK REQUIRED"
+
+def v8_research_queries(problem, issue_terms=None):
+    issue_terms = issue_terms or v7_issue_candidates(problem)
+    base = normalize_text(problem)
+    queries = []
+    for issue in issue_terms[:6]:
+        queries.append(f'"{issue}" Indian law official judgment statute')
+    citations = extract_legal_citations(base)
+    for c in citations[:8]:
+        queries.append(f'"{c}" official India Code judgment')
+    queries += [
+        "site:indiacode.nic.in current statutory text commencement amendment",
+        "site:sci.gov.in judgment ratio holding relevant facts",
+        "site:ecourts.gov.in jurisdiction procedure case status",
+    ]
+    return list(dict.fromkeys(queries))
+
+def v8_build_case_bundle(problem, laws=None, cases=None, metadata=None):
+    laws, cases = laws or [], cases or []
+    metadata = metadata or {}
+    workspace = build_case_workspace(problem, laws, cases)
+    return {
+        "application": "LegalMind AI Enterprise",
+        "schema_version": "v8",
+        "case": {
+            "case_id": workspace["case_id"],
+            "title": metadata.get("title", ""),
+            "client_reference": metadata.get("client_reference", ""),
+            "court": metadata.get("court", ""),
+            "jurisdiction": metadata.get("jurisdiction", ""),
+            "police_station": metadata.get("police_station", ""),
+            "case_number": metadata.get("case_number", ""),
+            "stage": metadata.get("stage", "RESEARCH"),
+            "tags": metadata.get("tags", ""),
+        },
+        "problem_statement": problem,
+        "fact_ledger": workspace["fact_ledger"],
+        "issues": workspace["issues"],
+        "evidence": workspace["evidence"],
+        "actions": workspace["actions"],
+        "authorities": workspace["authorities"],
+        "research_queries": v8_research_queries(problem),
+        "interview_questions": v8_interview_questions(problem),
+        "verification_gate": workspace["verification_status"],
+        "generated_at_utc": now_utc(),
+        "important_notice": (
+            "Research-support output only. Candidate laws and case leads are not proof of "
+            "a violation, liability, guilt, or likely outcome. Verify current primary sources."
+        ),
+    }
+
+def v8_ai_endpoint_status():
+    endpoint = os.environ.get("LEGALMIND_AI_ENDPOINT", "").strip()
+    provider = os.environ.get("LEGALMIND_AI_PROVIDER", "NOT CONFIGURED")
+    return {
+        "provider": provider,
+        "endpoint_configured": bool(endpoint),
+        "api_key_configured": bool(os.environ.get("LEGALMIND_AI_API_KEY")),
+        "status": "READY FOR CONNECTOR" if endpoint else "LOCAL / CONNECTOR NOT CONFIGURED",
+    }
+
+def v8_ai_request_payload(problem, task, context=None):
+    # Provider-neutral payload. Actual transmission is deliberately opt-in.
+    return {
+        "provider": os.environ.get("LEGALMIND_AI_PROVIDER", ""),
+        "task": task,
+        "system_rules": [
+            "Do not invent statutes, judgments, quotations or citations.",
+            "Separate fact, allegation, dispute and uncertainty.",
+            "Use retrieved authorities only for citations.",
+            "Explain why an authority is relevant and what factual difference may matter.",
+            "Do not predict case outcome or declare legal liability.",
+            "Flag missing facts and verification requirements."
+        ],
+        "problem": problem,
+        "context": context or {},
+    }
+
+
+# -------------------- v9 Legal Workbench & RAG Contract --------------------
+V9_GRAPH_SCHEMA = {
+    "audit_events": """
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            payload TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """,
+    "documents": """
+        CREATE TABLE IF NOT EXISTS case_documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            path TEXT DEFAULT '',
+            sha256 TEXT DEFAULT '',
+            doc_type TEXT DEFAULT 'OTHER',
+            pages INTEGER DEFAULT 0,
+            extracted_text_length INTEGER DEFAULT 0,
+            pii_redacted INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+    """,
+    "graph_links": """
+        CREATE TABLE IF NOT EXISTS issue_element_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id TEXT NOT NULL,
+            issue TEXT NOT NULL,
+            legal_element TEXT NOT NULL,
+            evidence_item TEXT NOT NULL,
+            support_status TEXT DEFAULT 'UNKNOWN',
+            source_reference TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """,
+    "rag_chunks": """
+        CREATE TABLE IF NOT EXISTS rag_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id TEXT NOT NULL,
+            document_id INTEGER DEFAULT 0,
+            chunk_id TEXT NOT NULL,
+            page_no INTEGER DEFAULT 0,
+            text TEXT NOT NULL,
+            sha256 TEXT DEFAULT '',
+            embedding_status TEXT DEFAULT 'NOT_INDEXED',
+            created_at TEXT NOT NULL
+        )
+    """,
+}
+
+def v9_db_init(conn):
+    for sql in V9_GRAPH_SCHEMA.values():
+        conn.execute(sql)
+    conn.commit()
+
+def v9_event(case_id, event_type, payload=None):
+    return {
+        "event_id": str(uuid.uuid4()),
+        "case_id": case_id,
+        "event_type": event_type,
+        "payload": payload or {},
+        "created_at": now_utc(),
+    }
+
+def v9_document_record(case_id, filename, path="", text="", pages=0, redacted=False):
+    digest = hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+    return {
+        "case_id": case_id,
+        "filename": filename,
+        "path": path,
+        "sha256": digest,
+        "doc_type": Path(filename).suffix.lower().lstrip(".").upper() or "OTHER",
+        "pages": pages,
+        "extracted_text_length": len(text or ""),
+        "pii_redacted": bool(redacted),
+        "created_at": now_utc(),
+    }
+
+def v9_chunk_text(text, chunk_size=1400, overlap=180):
+    text = normalize_text(text)
+    if not text:
+        return []
+    chunks, start, n = [], 0, len(text)
+    while start < n:
+        end = min(n, start + chunk_size)
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= n:
+            break
+        start = max(end - overlap, start + 1)
+    return chunks
+
+def v9_build_rag_records(case_id, document_id, text, page_no=0):
+    records = []
+    for i, chunk in enumerate(v9_chunk_text(text), 1):
+        records.append({
+            "case_id": case_id,
+            "document_id": document_id,
+            "chunk_id": f"{case_id}-CH-{i:04d}",
+            "page_no": page_no,
+            "text": chunk,
+            "sha256": hashlib.sha256(chunk.encode("utf-8")).hexdigest(),
+            "embedding_status": "NOT_INDEXED",
+            "created_at": now_utc(),
+        })
+    return records
+
+def v9_issue_element_graph(problem, laws=None):
+    laws = laws or []
+    facts = build_fact_ledger(problem)
+    issues = v7_issue_candidates(problem)
+    graph = []
+    # The graph intentionally uses "candidate" language. It does not assert
+    # that any statutory element is satisfied.
+    for issue in issues:
+        if laws:
+            for law in laws[:8]:
+                name = law.get("name", law.get("title", str(law))) if isinstance(law, dict) else str(law)
+                graph.append({
+                    "issue": issue,
+                    "legal_element": f"Element(s) of candidate authority: {name} — VERIFY FROM PRIMARY TEXT",
+                    "evidence_item": "Map relevant fact/evidence after reviewing the statutory ingredients",
+                    "support_status": "UNKNOWN",
+                    "source_reference": "PRIMARY SOURCE REQUIRED",
+                })
+        else:
+            graph.append({
+                "issue": issue,
+                "legal_element": "Identify the exact statutory ingredients after authority retrieval",
+                "evidence_item": "Select evidence that tends to establish or contradict each ingredient",
+                "support_status": "UNKNOWN",
+                "source_reference": "PRIMARY SOURCE REQUIRED",
+            })
+    return {
+        "issues": issues,
+        "facts": facts,
+        "links": graph,
+        "warning": "UNKNOWN means not assessed; it does not mean absent or present.",
+    }
+
+def v9_ai_rag_contract(problem, retrieved_chunks=None, task="legal research"):
+    chunks = retrieved_chunks or []
+    return {
+        "task": task,
+        "system_constraints": [
+            "Answer only from supplied/retrieved evidence and clearly marked general reasoning.",
+            "Never fabricate statutes, judgments, quotations, paragraph numbers or URLs.",
+            "Every authority claim must carry a source reference.",
+            "Distinguish primary authority, secondary material and user-provided material.",
+            "Flag conflicts between sources and facts.",
+            "Do not predict outcome or declare guilt/liability.",
+            "If retrieval is insufficient, say that more research is required.",
+        ],
+        "problem": problem,
+        "retrieved_context": [
+            {
+                "chunk_id": x.get("chunk_id"),
+                "page_no": x.get("page_no"),
+                "text": x.get("text"),
+                "source_sha256": x.get("sha256"),
+            }
+            for x in chunks
+        ],
+    }
+
+def v9_quality_gate(bundle):
+    problems = []
+    if not bundle.get("problem_statement"):
+        problems.append("No problem statement.")
+    if not bundle.get("authorities"):
+        problems.append("No authority ledger entries.")
+    if any(a.get("status", "").startswith("UNVERIFIED") for a in bundle.get("authorities", [])):
+        problems.append("At least one authority remains unverified.")
+    if not bundle.get("fact_ledger"):
+        problems.append("No extracted facts.")
+    return {
+        "status": "READY FOR HUMAN REVIEW" if not problems else "RESEARCH INCOMPLETE",
+        "blocking_items": problems,
+        "rule": "Passing this gate does not mean the legal conclusion is correct.",
+    }
+
+def v9_build_full_bundle(problem, laws=None, cases=None, metadata=None):
+    bundle = v8_build_case_bundle(problem, laws, cases, metadata)
+    graph = v9_issue_element_graph(problem, laws)
+    bundle["schema_version"] = "v9"
+    bundle["case_graph"] = graph
+    bundle["rag_contract"] = v9_ai_rag_contract(problem)
+    bundle["audit_event"] = v9_event(bundle["case"]["case_id"], "BUNDLE_GENERATED")
+    bundle["quality_gate"] = v9_quality_gate(bundle)
+    return bundle
+
+
+# -------------------- v10 Retrieval, Chronology & Reporting --------------------
+V10_RETRIEVAL_VERSION = "10"
+
+V10_STOPWORDS = {
+    "the","and","or","of","to","in","on","for","a","an","is","are","was","were",
+    "with","that","this","from","by","as","at","be","has","have","had","it","its",
+    "their","they","he","she","them","his","her","which","who","what","when","where",
+    "how","why","then","than","into","over","under","after","before","about","there",
+    "here","not","but","also","may","can","could","would","should","alleged","claims"
+}
+
+def v10_terms(text):
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", (text or "").lower())
+    return [w for w in words if w not in V10_STOPWORDS]
+
+def v10_tfidf_like_score(query, text):
+    # Explainable local relevance score. It is NOT a legal confidence score.
+    q = Counter(v10_terms(query))
+    d = Counter(v10_terms(text))
+    if not q or not d:
+        return 0.0
+    overlap = sum(min(q[k], d[k]) for k in q if k in d)
+    q_norm = math.sqrt(sum(v*v for v in q.values()))
+    d_norm = math.sqrt(sum(v*v for v in d.values()))
+    return round(overlap / (q_norm * d_norm), 4) if q_norm and d_norm else 0.0
+
+def v10_rank_chunks(query, chunks, top_k=8):
+    ranked = []
+    for ch in chunks or []:
+        text = ch.get("text", "")
+        score = v10_tfidf_like_score(query, text)
+        ranked.append({
+            "chunk_id": ch.get("chunk_id", ""),
+            "page_no": ch.get("page_no", 0),
+            "text": text,
+            "score": score,
+            "source_sha256": ch.get("sha256", ""),
+        })
+    ranked.sort(key=lambda x: x["score"], reverse=True)
+    for i, row in enumerate(ranked[:top_k], 1):
+        row["rank"] = i
+    return ranked[:top_k]
+
+def v10_extract_events(problem):
+    sentences = [normalize_text(x) for x in re.split(r"(?<=[.!?])\s+", problem or "") if normalize_text(x)]
+    events = []
+    for sentence in sentences:
+        dates = extract_dates(sentence)
+        if dates:
+            for date in dates:
+                events.append({
+                    "date_text": date,
+                    "event": sentence,
+                    "status": classify_fact_status(sentence),
+                })
+    return events
+
+def v10_chronology(problem):
+    events = v10_extract_events(problem)
+    # Keep original text ordering when date parsing is ambiguous.
+    for i, event in enumerate(events, 1):
+        event["sequence"] = i
+    return events
+
+def v10_find_gaps(problem):
+    low = (problem or "").lower()
+    gaps = []
+    checks = [
+        (["date", "on ", "202"], "Exact dates and sequence of material events"),
+        (["contract", "agreement"], "Exact agreement/terms and any notice or cure provision"),
+        (["payment", "paid", "amount", "refund"], "Amount, payment trail and transaction proof"),
+        (["message", "email", "call", "whatsapp"], "Original communication records and context"),
+        (["injury", "hurt", "hospital", "medical"], "Medical records and chronology"),
+        (["company", "employer", "employee"], "Correct legal identity and role of each entity/person"),
+    ]
+    for keys, gap in checks:
+        if any(k in low for k in keys):
+            gaps.append(gap)
+    gaps += [
+        "Applicable jurisdiction and forum",
+        "Relevant limitation / commencement dates",
+        "Any contrary explanation or disputed fact",
+        "Available independent evidence for each material assertion",
+    ]
+    return list(dict.fromkeys(gaps))
+
+def v10_source_card(authority, source_url="", source_type="PRIMARY / VERIFY"):
+    return {
+        "authority": authority,
+        "source_url": source_url,
+        "source_type": source_type,
+        "verification": "NOT VERIFIED IN THIS LOCAL BUILD",
+        "citation_rule": "Do not cite as verified until the complete source is reviewed.",
+    }
+
+def v10_generate_html_report(bundle, output_path):
+    case = bundle.get("case", {})
+    facts = bundle.get("fact_ledger", [])
+    issues = bundle.get("issues", [])
+    evidence = bundle.get("evidence", [])
+    authorities = bundle.get("authorities", [])
+    chronology = bundle.get("chronology", [])
+    gaps = bundle.get("research_gaps", [])
+
+    def li(items):
+        return "".join(f"<li>{html.escape(str(x))}</li>" for x in items)
+
+    fact_html = "".join(
+        f"<tr><td>{html.escape(f.get('id',''))}</td>"
+        f"<td>{html.escape(f.get('status',''))}</td>"
+        f"<td>{html.escape(f.get('statement',''))}</td></tr>"
+        for f in facts
+    )
+    auth_html = "".join(
+        f"<tr><td>{html.escape(str(a.get('authority','')))}</td>"
+        f"<td>{html.escape(str(a.get('type','')))}</td>"
+        f"<td>{html.escape(str(a.get('status','')))}</td></tr>"
+        for a in authorities
+    )
+    chrono_html = "".join(
+        f"<tr><td>{html.escape(str(e.get('date_text','')))}</td>"
+        f"<td>{html.escape(str(e.get('status','')))}</td>"
+        f"<td>{html.escape(str(e.get('event','')))}</td></tr>"
+        for e in chronology
+    )
+
+    doc = f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>LegalMind Case Report</title>
+<style>
+body{{font-family:Arial,sans-serif;max-width:1100px;margin:30px auto;padding:0 20px;line-height:1.5}}
+h1,h2{{margin-top:1.4em}} table{{width:100%;border-collapse:collapse;margin:12px 0 24px}}
+th,td{{border:1px solid #bbb;padding:8px;vertical-align:top}} th{{text-align:left}}
+.notice{{border:1px solid #888;padding:12px;margin:15px 0}}
+.small{{font-size:12px;color:#555}}
+</style></head><body>
+<h1>⚖ LegalMind AI Enterprise — Research Report</h1>
+<div class="notice"><b>STATUS:</b> RESEARCH DRAFT — HUMAN VERIFICATION REQUIRED.<br>
+This report is research support. It does not determine violation, guilt, liability, or case outcome.</div>
+<h2>Matter</h2>
+<ul>
+<li><b>Case ID:</b> {html.escape(str(case.get('case_id','')))}</li>
+<li><b>Title:</b> {html.escape(str(case.get('title','') or '(untitled)'))}</li>
+<li><b>Court/Jurisdiction:</b> {html.escape(str(case.get('court','') or '(not supplied)'))}</li>
+<li><b>Stage:</b> {html.escape(str(case.get('stage','RESEARCH')))}</li>
+</ul>
+<h2>Problem Statement</h2><p>{html.escape(str(bundle.get('problem_statement','')))}</p>
+<h2>Issues to Review</h2><ul>{li([x.get('issue','') for x in issues])}</ul>
+<h2>Fact Ledger</h2>
+<table><tr><th>ID</th><th>Status</th><th>Statement</th></tr>{fact_html}</table>
+<h2>Chronology</h2>
+<table><tr><th>Date</th><th>Status</th><th>Event</th></tr>{chrono_html or '<tr><td colspan="3">No dates detected.</td></tr>'}</table>
+<h2>Evidence Checklist</h2><ul>{li([x.get('item','') for x in evidence])}</ul>
+<h2>Authorities</h2>
+<table><tr><th>Authority</th><th>Type</th><th>Verification</th></tr>{auth_html or '<tr><td colspan="3">No authority entries yet.</td></tr>'}</table>
+<h2>Research Gaps</h2><ul>{li(gaps)}</ul>
+<h2>Verification Gate</h2>
+<ul>{li(bundle.get('verification_checks', [
+    "Verify current statute and commencement",
+    "Read complete judgments",
+    "Confirm jurisdiction and procedure",
+    "Check limitation",
+    "Map evidence to statutory elements",
+    "Review disputed facts",
+]))}</ul>
+<p class="small">Generated by LegalMind AI Enterprise v10. Local prototype; source verification is required before reliance.</p>
+</body></html>"""
+    Path(output_path).write_text(doc, encoding="utf-8")
+    return output_path
+
+def v10_build_report_bundle(problem, laws=None, cases=None, metadata=None):
+    bundle = v9_build_full_bundle(problem, laws, cases, metadata)
+    bundle["schema_version"] = "v10"
+    bundle["chronology"] = v10_chronology(problem)
+    bundle["research_gaps"] = v10_find_gaps(problem)
+    bundle["retrieval_notes"] = [
+        "Local relevance ranking is explainable text similarity only.",
+        "A higher score does not mean stronger legal authority or a likely outcome.",
+        "Use official-source retrieval for current legislation and judgments.",
+    ]
+    bundle["verification_checks"] = [
+        "Verify current statutory text, commencement and amendments",
+        "Check definitions, exceptions and procedural provisions",
+        "Read the complete judgment for every relied-upon case",
+        "Verify jurisdiction, forum and limitation",
+        "Map each material element to evidence",
+        "Review allegations, disputes and alternative explanations",
+        "Confirm every citation before filing or client communication",
+    ]
+    return bundle
+
+
+# -------------------- v11 Local Evidence Library & Research Dashboard --------------------
+V11_DOCUMENT_INDEX = "LEGALMIND_LOCAL_INDEX_V11"
+
+def v11_document_fingerprint(path):
+    p = Path(path)
+    try:
+        data = p.read_bytes()
+        return hashlib.sha256(data).hexdigest()
+    except Exception:
+        return hashlib.sha256(str(p).encode("utf-8")).hexdigest()
+
+def v11_extract_plain_file(path):
+    p = Path(path)
+    suffix = p.suffix.lower()
+    if suffix in (".txt", ".md", ".csv", ".json", ".log"):
+        return p.read_text(encoding="utf-8", errors="replace")
+    # Reuse optional PDF/DOCX extraction functions when present in the v4-v10 code.
+    if suffix == ".pdf":
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(str(p))
+            return "\n".join((page.extract_text() or "") for page in reader.pages)
+        except Exception as e:
+            raise RuntimeError("PDF extraction requires pypdf. " + str(e))
+    if suffix == ".docx":
+        try:
+            from docx import Document
+            doc = Document(str(p))
+            return "\n".join(par.text for par in doc.paragraphs)
+        except Exception as e:
+            raise RuntimeError("DOCX extraction requires python-docx. " + str(e))
+    raise RuntimeError("Unsupported file type. Use TXT, MD, CSV, JSON, LOG, PDF or DOCX.")
+
+def v11_build_index(path, case_id):
+    text = v11_extract_plain_file(path)
+    chunks = v9_build_rag_records(case_id, 0, text)
+    for ch in chunks:
+        ch["document_sha256"] = v11_document_fingerprint(path)
+        ch["filename"] = Path(path).name
+    return {
+        "case_id": case_id,
+        "filename": Path(path).name,
+        "path": str(Path(path).resolve()),
+        "document_sha256": v11_document_fingerprint(path),
+        "text_length": len(text),
+        "chunk_count": len(chunks),
+        "chunks": chunks,
+        "created_at": now_utc(),
+    }
+
+def v11_search_library(query, library, top_k=10):
+    rows = []
+    for doc in library or []:
+        for ch in doc.get("chunks", []):
+            score = v10_tfidf_like_score(query, ch.get("text", ""))
+            if score > 0:
+                rows.append({
+                    "filename": doc.get("filename", ""),
+                    "document_sha256": doc.get("document_sha256", ""),
+                    "chunk_id": ch.get("chunk_id", ""),
+                    "page_no": ch.get("page_no", 0),
+                    "score": score,
+                    "text": ch.get("text", ""),
+                })
+    rows.sort(key=lambda x: (-x["score"], x["filename"], x["chunk_id"]))
+    return rows[:top_k]
+
+def v11_source_answer_template(question, hits):
+    # Produces a source-backed answer scaffold; it intentionally does not invent
+    # an answer from the retrieved text.
+    return {
+        "question": question,
+        "retrieved_sources": [
+            {
+                "rank": i + 1,
+                "filename": h["filename"],
+                "chunk_id": h["chunk_id"],
+                "page_no": h["page_no"],
+                "relevance": h["score"],
+                "excerpt": h["text"][:900],
+                "document_sha256": h["document_sha256"],
+            }
+            for i, h in enumerate(hits)
+        ],
+        "answer_policy": (
+            "Generate the substantive answer only after reviewing the retrieved source text. "
+            "Every legal proposition must cite its supporting source. If the sources are insufficient, "
+            "state that research is incomplete rather than fabricating authority."
+        ),
+    }
+
+def v11_dashboard_metrics(problem, library):
+    facts = build_fact_ledger(problem)
+    chronology = v10_chronology(problem)
+    gaps = v10_find_gaps(problem)
+    total_chunks = sum(d.get("chunk_count", 0) for d in library or [])
+    return {
+        "case_id": v8_new_case_id(problem) if problem else "",
+        "facts": len(facts),
+        "dates": len(chronology),
+        "research_gaps": len(gaps),
+        "documents": len(library or []),
+        "indexed_chunks": total_chunks,
+        "authority_leads": len(extract_legal_citations(problem)),
+    }
+
+
+# -------------------- v12 Research Cockpit & Claim Ledger --------------------
+V12_CLAIM_TYPES = [
+    "FACT",
+    "LEGAL PROPOSITION",
+    "CASE LAW PROPOSITION",
+    "PROCEDURAL POINT",
+    "USER ASSERTION",
+]
+
+V12_VERIFICATION = [
+    "UNVERIFIED",
+    "USER VERIFIED",
+    "OFFICIAL SOURCE VERIFIED",
+    "CONFLICTING SOURCES",
+    "NEEDS MORE RESEARCH",
+]
+
+def v12_claim_id(text):
+    return "CLM-" + hashlib.sha256(normalize_text(text).lower().encode("utf-8")).hexdigest()[:10].upper()
+
+def v12_build_claim_ledger(problem):
+    facts = build_fact_ledger(problem)
+    rows = []
+    for f in facts:
+        rows.append({
+            "claim_id": v12_claim_id(f["statement"]),
+            "type": "FACT",
+            "claim": f["statement"],
+            "status": f["status"],
+            "verification": "UNVERIFIED",
+            "source": "",
+            "page_para": "",
+            "notes": "",
+        })
+    citations = extract_legal_citations(problem)
+    for c in citations:
+        rows.append({
+            "claim_id": v12_claim_id(c),
+            "type": "LEGAL PROPOSITION",
+            "claim": c,
+            "status": "USER CITED",
+            "verification": "UNVERIFIED",
+            "source": "India Code / primary source required",
+            "page_para": "",
+            "notes": "Verify exact current provision before reliance.",
+        })
+    return rows
+
+def v12_opposing_analysis(problem):
+    low = (problem or "").lower()
+    points = [
+        "Identify facts that materially weaken the proposed theory.",
+        "Identify any innocent, contractual, procedural, or alternative explanation.",
+        "Check whether a required statutory ingredient is unsupported or disputed.",
+        "Check whether the alleged conduct occurred within the relevant jurisdiction.",
+        "Check limitation, commencement, notice, consent, authorization, exceptions and defenses where relevant.",
+        "Look for documents or witnesses that could contradict the current narrative.",
+    ]
+    if "contract" in low or "agreement" in low:
+        points.append("Check formation, authority, consideration/terms, performance, breach, notice and remedies.")
+    if any(x in low for x in ["payment", "money", "refund", "loan"]):
+        points.append("Check whether payment records support the amount, purpose, recipient and subsequent demand.")
+    return points
+
+def v12_draft_outline(problem, laws=None, cases=None):
+    return {
+        "title": "Preliminary Legal Research Memorandum",
+        "sections": [
+            "1. Question Presented",
+            "2. Material Facts (with fact status)",
+            "3. Issues for Research",
+            "4. Candidate Legal Provisions (to be verified)",
+            "5. Relevant Authorities (complete judgments required)",
+            "6. Element-by-Element Analysis",
+            "7. Evidence Mapping",
+            "8. Counter-Analysis / Alternative Explanations",
+            "9. Procedural, Jurisdiction and Limitation Checks",
+            "10. Missing Facts and Research Gaps",
+            "11. Conclusion of Research Status (not outcome prediction)",
+        ],
+        "notice": "Drafting aid only. Verify all law and authorities before professional use.",
+    }
+
+def v12_build_research_session(problem, library=None, laws=None, cases=None, metadata=None):
+    bundle = v10_build_report_bundle(problem, laws, cases, metadata)
+    claims = v12_build_claim_ledger(problem)
+    opposition = v12_opposing_analysis(problem)
+    outline = v12_draft_outline(problem, laws, cases)
+    library = library or []
+    hits = v11_search_library(problem, library, 12) if library else []
+    return {
+        "session_id": "SES-" + hashlib.sha256((normalize_text(problem) + now_utc()).encode("utf-8")).hexdigest()[:12].upper(),
+        "created_at_utc": now_utc(),
+        "case": bundle["case"],
+        "problem_statement": problem,
+        "claims": claims,
+        "issues": bundle["issues"],
+        "authorities": bundle["authorities"],
+        "chronology": bundle["chronology"],
+        "research_gaps": bundle["research_gaps"],
+        "opposing_analysis": opposition,
+        "draft_outline": outline,
+        "retrieved_local_sources": hits,
+        "verification_gate": bundle["verification_checks"],
+        "safety_status": "RESEARCH DRAFT — HUMAN VERIFICATION REQUIRED",
+    }
+
+def v12_render_claim_ledger(session):
+    lines = ["CLAIM / CITATION LEDGER", ""]
+    for c in session.get("claims", []):
+        lines += [
+            f"{c['claim_id']} | {c['type']} | {c['verification']}",
+            f"  {c['claim']}",
+            f"  Source: {c['source'] or '(none recorded)'}",
+            f"  Page/Para: {c['page_para'] or '(not recorded)'}",
+            "",
+        ]
+    return "\n".join(lines)
+
+def v12_render_opposition(session):
+    return "COUNTER-ANALYSIS CHECKLIST\n\n" + "\n".join(
+        f"{i+1}. {x}" for i, x in enumerate(session.get("opposing_analysis", []))
+    )
+
+def v12_render_draft_outline(session):
+    return (
+        "PRELIMINARY MEMORANDUM OUTLINE\n\n"
+        + "\n".join(session.get("draft_outline", {}).get("sections", []))
+        + "\n\n"
+        + session.get("draft_outline", {}).get("notice", "")
+    )
+
+
+class LegalMind(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title(APP + " — AI Legal Research Workbench")
+        self.geometry("1380x880")
+        self.minsize(1100,720)
+        self.style=ttk.Style(self)
+        try:self.style.theme_use("clam")
+        except:pass
+        self.result_data=None
+        create_audit_db()
+        create_documents_db()
+        self.build()
+
+        self.advanced_command_center()
+
+        self.v6_case_intelligence()
+
+        self.v7_case_workspace_ui()
+
+        self.v8_research_workbench_ui()
+
+        self.v9_workbench_ui()
+
+        self.v10_research_ui()
+
+        self.v11_evidence_library_ui()
+
+        self.v12_research_cockpit_ui()
+
+    def build(self):
+        header=ttk.Frame(self,padding=12); header.pack(fill="x")
+        ttk.Label(header,text="⚖ LegalMind AI Enterprise",font=("Segoe UI",24,"bold")).pack(side="left")
+        ttk.Label(header,text="Legal research • issue mapping • precedent discovery • evidence analysis",
+                  font=("Segoe UI",10)).pack(side="left",padx=18)
+        ttk.Button(header,text="India Code",command=lambda:webbrowser.open(OFFICIAL_INDIA_CODE)).pack(side="right")
+        ttk.Button(header,text="SC Judgments",command=lambda:webbrowser.open(OFFICIAL_SC_JUDGMENTS)).pack(side="right",padx=5)
+
+        nb=ttk.Notebook(self); nb.pack(fill="both",expand=True,padx=10,pady=(0,10))
+        self.build_analyzer(nb); self.build_laws(nb); self.build_cases(nb)
+        self.build_evidence(nb); self.build_report(nb); self.build_matrix(nb)
+        self.build_queries(nb); self.build_questions(nb); self.build_factmap(nb)
+        self.build_library(nb); self.build_theories(nb); self.build_verification(nb)
+        self.build_history(nb); self.build_audit(nb)
+
+    def build_analyzer(self,nb):
+        tab=ttk.Frame(nb,padding=10); nb.add(tab,text="1 • Analyze Problem")
+        top=ttk.Frame(tab); top.pack(fill="x")
+        ttk.Label(top,text="Jurisdiction:").pack(side="left")
+        self.jur=tk.StringVar(value="India")
+        ttk.Combobox(top,textvariable=self.jur,values=["India","State-specific / add manually"],
+                     width=28,state="readonly").pack(side="left",padx=6)
+        ttk.Label(top,text="Role:").pack(side="left",padx=(18,4))
+        self.role=tk.StringVar(value="Not specified")
+        ttk.Combobox(top,textvariable=self.role,
+                     values=["Not specified","Complainant / Plaintiff","Accused / Defendant",
+                             "Witness","Law student / Researcher"],width=25,state="readonly").pack(side="left")
+        ttk.Label(tab,text="Describe the problem in your own words:",font=("Segoe UI",12,"bold")).pack(anchor="w",pady=(12,4))
+        self.problem=tk.Text(tab,height=13,wrap="word",font=("Segoe UI",11))
+        self.problem.pack(fill="both",expand=True)
+        actions=ttk.Frame(tab); actions.pack(fill="x",pady=8)
+        ttk.Button(actions,text="🔎 Analyze",command=self.analyze).pack(side="left")
+        ttk.Button(actions,text="📄 Import Document",command=self.import_document).pack(side="left",padx=6)
+        ttk.Button(actions,text="🧩 Extract Facts",command=self.extract_facts_only).pack(side="left",padx=6)
+        ttk.Button(actions,text="🔒 Redact PII",command=self.redact_input).pack(side="left")
+        ttk.Button(actions,text="Clear",command=self.clear).pack(side="left",padx=6)
+        ttk.Button(actions,text="Save Case",command=self.save).pack(side="left")
+        ttk.Button(actions,text="Export Report",command=self.export).pack(side="left",padx=6)
+        ttk.Label(tab,text="Research scores show textual relevance only — they are not probabilities that a law was violated.",
+                  font=("Segoe UI",9,"italic")).pack(anchor="w")
+
+    def text_tab(self,nb,title):
+        tab=ttk.Frame(nb,padding=10); nb.add(tab,text=title)
+        box=tk.Text(tab,wrap="word",font=("Segoe UI",10))
+        box.pack(fill="both",expand=True)
+        return box
+
+    def build_laws(self,nb): self.laws=self.text_tab(nb,"2 • Laws & Elements")
+    def build_cases(self,nb): self.cases=self.text_tab(nb,"3 • Similar Cases")
+    def build_evidence(self,nb): self.evidence=self.text_tab(nb,"4 • Evidence & Missing Facts")
+    def build_report(self,nb): self.report=self.text_tab(nb,"5 • Case Structure")
+    def build_history(self,nb):
+        tab=ttk.Frame(nb,padding=10); nb.add(tab,text="6 • Saved Cases")
+        self.history=tk.Text(tab,wrap="word",font=("Segoe UI",10))
+        self.history.pack(fill="both",expand=True)
+        ttk.Button(tab,text="Refresh",command=self.load_history).pack(anchor="w",pady=6)
+        self.load_history()
+
+
+    def build_questions(self, nb):
+        self.questions = self.text_tab(nb, "8 • AI Follow-up Questions")
+
+    def import_document(self):
+        path = filedialog.askopenfilename(
+            title="Import legal document",
+            filetypes=[("Legal/text documents", "*.txt *.md *.csv *.json *.docx *.pdf"),
+                       ("All files", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            text = extract_text_file(path)
+            if not text.strip():
+                raise RuntimeError("The document contains no extractable text.")
+            self.problem.delete("1.0", "end")
+            self.problem.insert("1.0", text[:120000])
+            digest=index_document(Path(path).name, path, text[:300000])
+            audit("IMPORT_DOCUMENT", "", f"{Path(path).name}; sha256={digest}")
+            messagebox.showinfo("Imported", f"Loaded and indexed {Path(path).name}.")
+        except Exception as e:
+            messagebox.showerror("Import failed", str(e))
+
+    def redact_input(self):
+        text = self.problem.get("1.0", "end")
+        self.problem.delete("1.0", "end")
+        self.problem.insert("1.0", redact_basic_pii(text))
+        audit("REDACT_PII", "", "Basic local redaction applied.")
+        messagebox.showinfo("PII Redaction", "Obvious email addresses and Indian mobile-number patterns were redacted locally.")
+
+    def build_factmap(self, nb):
+        self.factmap = self.text_tab(nb, "9 • Fact Map")
+
+    def build_audit(self, nb):
+        self.audit_box = self.text_tab(nb, "10 • Audit Trail")
+        self.load_audit()
+
+    def load_audit(self):
+        if not hasattr(self, "audit_box"):
+            return
+        self.audit_box.delete("1.0","end")
+        con=sqlite3.connect(DB)
+        rows=con.execute("SELECT created_at,action,case_id,details FROM audit_log ORDER BY id DESC LIMIT 200").fetchall()
+        con.close()
+        for dt,action,cid,details in rows:
+            self.audit_box.insert("end", f"{dt} | {action} | {cid}\n{details}\n\n")
+
+    def extract_facts_only(self):
+        problem=self.problem.get("1.0","end").strip()
+        if len(problem)<10:
+            messagebox.showwarning("Input needed","Enter a problem statement first.")
+            return
+        ent=extract_entities(problem)
+        facts=fact_classification(problem)
+        self.factmap.delete("1.0","end")
+        self.factmap.insert("end","STRUCTURED FACT MAP\n\n")
+        self.factmap.insert("end","PEOPLE / NAMED PERSONS\n")
+        self.factmap.insert("end", (", ".join(ent["people_or_named_persons"]) or "None detected")+"\n\n")
+        self.factmap.insert("end","DATES\n"+(", ".join(ent["dates"]) or "None detected")+"\n\n")
+        self.factmap.insert("end","MONEY\n"+(", ".join(ent["money_mentions"]) or "None detected")+"\n\n")
+        self.factmap.insert("end","DIGITAL IDENTIFIERS\n")
+        self.factmap.insert("end","Emails: "+(", ".join(ent["emails"]) or "None detected")+"\n")
+        self.factmap.insert("end","Phones: "+(", ".join(ent["phones"]) or "None detected")+"\n\n")
+        self.factmap.insert("end","FACT / ALLEGATION CLASSIFICATION\n\n")
+        for label,s in facts:
+            self.factmap.insert("end",f"[{label}] {s}\n")
+        self.factmap.insert("end","\nThese are extraction aids, not verified findings.\n")
+
+    def build_library(self, nb):
+        self.library = self.text_tab(nb, "10 • Case Document Library")
+        self.library.insert("end", "Imported documents are indexed locally for similarity search.\n")
+        self.library.insert("end", "Use the analyzer's Import Document button to add a file.\n")
+
+    def build_theories(self, nb):
+        self.theories = self.text_tab(nb, "11 • Legal Theories")
+
+    def build_verification(self, nb):
+        self.verification = self.text_tab(nb, "12 • Verification Gate")
+
+    def build_matrix(self, nb):
+        self.matrix = self.text_tab(nb, "6 • Issue Matrix")
+
+    def build_queries(self, nb):
+        self.queries = self.text_tab(nb, "7 • Research Queries")
+
+    def _render_matrix(self, rows):
+        self.matrix.delete("1.0", "end")
+        self.matrix.insert("end", "FACT → ISSUE → LAW → VERIFICATION MATRIX\n\n")
+        for i, r in enumerate(rows, 1):
+            self.matrix.insert("end", f"{i}. ISSUE: {r['issue']}\n")
+            self.matrix.insert("end", f"   LAW: {r['law']}\n")
+            self.matrix.insert("end", f"   RELEVANCE: {r['relevance']}/100 (textual only)\n")
+            self.matrix.insert("end", f"   FACT SIGNALS: {r['facts']}\n")
+            self.matrix.insert("end", f"   VERIFY: {r['verify']}\n\n")
+
+    def _render_queries(self, queries):
+        self.queries.delete("1.0", "end")
+        self.queries.insert("end", "READY-TO-USE RESEARCH QUERIES\n\n")
+        self.queries.insert("end", "Use these queries on official court/statute databases.\n\n")
+        for i, q in enumerate(queries, 1):
+            self.queries.insert("end", f"{i}. {q}\n")
+
+    def clear(self):
+        self.problem.delete("1.0","end")
+        for box in [self.laws,self.cases,self.evidence,self.report,self.matrix,self.queries,self.questions,self.factmap,self.theories,self.verification]:
+            box.delete("1.0","end")
+        self.result_data=None
+
+    def analyze(self):
+        problem=self.problem.get("1.0","end").strip()
+        if len(problem)<30:
+            messagebox.showwarning("More detail needed","Enter at least a few sentences describing the facts.")
+            return
+
+        laws=analyze_laws(problem)
+        cases=analyze_cases(problem)
+        semantic_cases=semantic_case_leads(problem)
+        questions=facts_and_questions(problem)
+        deep_questions=generate_case_questions(problem,laws)
+        counters=counter_arguments(problem,[x[2] for x in laws])
+        dates=timeline(problem)
+        issue_rows=build_issue_matrix(problem,laws)
+        evidence_rows=evidence_map(problem,laws)
+        queries=build_search_queries(problem,laws,cases)
+        limitations=limitation_check(problem)
+        entities=extract_entities(problem)
+        fact_rows=fact_classification(problem)
+        risks=risk_flags(problem)
+        indexed=search_index(problem,10)
+        contradictions=detect_contradictions(problem)
+        element_rows=build_element_checklist(laws)
+        theories=build_case_theories(problem,laws)
+        gate=verification_gate(self.result_data or {})
+
+        self.laws.delete("1.0","end")
+        self.laws.insert("end","POTENTIALLY RELEVANT LAWS & ELEMENTS\n\n")
+        for score,hits,law in laws:
+            self.laws.insert("end",f"[{issue_priority(score)}] {law['act']} — {law['section']}\n")
+            self.laws.insert("end",f"{law['title']}\n")
+            self.laws.insert("end",f"Research relevance: {score}/100 (textual relevance only)\n")
+            self.laws.insert("end",f"Why it may relate: {law['why']}\n")
+            self.laws.insert("end",f"Matched fact signals: {', '.join(hits)}\n")
+            self.laws.insert("end","Elements requiring verification:\n")
+            for e in law["elements"]: self.laws.insert("end",f"  ☐ {e}\n")
+            self.laws.insert("end",f"Official portal: {OFFICIAL_INDIA_CODE}\n\n")
+
+        self.cases.delete("1.0","end")
+        self.cases.insert("end","PRECEDENT RESEARCH WORKBENCH\n\n")
+        seen=set()
+        for sim,c in semantic_cases[:12]:
+            seen.add(c["name"])
+            self.cases.insert("end",f"CASE: {c['name']} ({c['year']})\n")
+            self.cases.insert("end",f"COURT: {c['court']}\n")
+            self.cases.insert("end",f"LOCAL TEXT SIMILARITY: {sim:.1f}/100 — research signal only\n")
+            self.cases.insert("end",f"{c['summary']}\n")
+            self.cases.insert("end",f"VERIFY: {OFFICIAL_SC_SEARCH}\n\n")
+        for _,hits,c in cases:
+            if c["name"] not in seen:
+                self.cases.insert("end",f"CASE: {c['name']} ({c['year']})\n")
+                self.cases.insert("end",f"{c['summary']}\nVERIFY: {OFFICIAL_SC_SEARCH}\n\n")
+
+        self.evidence.delete("1.0","end")
+        self.evidence.insert("end","EVIDENCE & FACT REVIEW\n\n")
+        self.evidence.insert("end","RISK FLAGS\n")
+        for x in risks or ["None detected by the local rule set."]:
+            self.evidence.insert("end",f"• {x}\n")
+        self.evidence.insert("end","\nMISSING FACTS\n")
+        for i,q in enumerate(questions,1): self.evidence.insert("end",f"{i}. {q}\n")
+        self.evidence.insert("end","\nEVIDENCE MAP\n")
+        for label,status,signals in evidence_rows:
+            self.evidence.insert("end",f"• {label}: {status}\n  Signals: {signals}\n")
+        self.evidence.insert("end","\nPOSSIBLE CONTRADICTIONS / INTERNAL CONSISTENCY CHECK\n")
+        if contradictions:
+            for a,b,sa,sb in contradictions:
+                self.evidence.insert("end",f"• Sentences {a} and {b} may need review:\n  A: {sa}\n  B: {sb}\n")
+        else:
+            self.evidence.insert("end","• No simple contradiction pattern detected.\n")
+        self.evidence.insert("end","\nCOUNTER-ANALYSIS\n")
+        for c in counters:self.evidence.insert("end",f"• {c}\n")
+        self.evidence.insert("end","\nLIMITATION / COMMENCEMENT\n")
+        for x in limitations:self.evidence.insert("end",f"• {x}\n")
+
+        self.theories.delete("1.0","end")
+        self.theories.insert("end","LEGAL THEORY WORKBENCH\n\n")
+        for t in theories:
+            self.theories.insert("end",f"THEORY: {t['theory']}\n")
+            self.theories.insert("end",f"PROVISION: {t['provision']}\n")
+            self.theories.insert("end",f"FACT SIGNALS: {', '.join(t['supporting_signals'])}\n")
+            self.theories.insert("end",f"STATUS: {t['status']}\n\n")
+        self.theories.insert("end","ELEMENT CHECKLIST\n\n")
+        for e in element_rows:
+            self.theories.insert("end",f"☐ {e['law']}\n  Element: {e['element']}\n  Status: {e['status']}\n  Evidence: {e['evidence']}\n\n")
+
+        self.verification.delete("1.0","end")
+        self.verification.insert("end","FINAL VERIFICATION GATE\n\n")
+        self.verification.insert("end","The report should be treated as RESEARCH DRAFT until every gate is checked by a human.\n\n")
+        for i,(label,done) in enumerate(gate,1):
+            self.verification.insert("end",f"☐ {i}. {label}\n")
+        self.verification.insert("end","\nNo AI-generated authority should be treated as verified merely because it appears in this application.\n")
+
+        self.report.delete("1.0","end")
+        self.report.insert("end",generate_legal_brief(
+            problem,laws,cases,questions,counters,self.jur.get(),self.role.get()
+        ))
+        self.report.insert("end",f"\n\nCASE ID: {make_case_id(problem)}\n")
+        self.report.insert("end","\nDECISION SUPPORT STATUS: RESEARCH DRAFT — HUMAN VERIFICATION REQUIRED\n")
+        self.report.insert("end","\nRESEARCH PRIORITIES\n")
+        priorities=[
+            "Verify current statutory text, amendments and commencement.",
+            "Verify jurisdiction, forum, limitation and procedure.",
+            "Read the complete judgments and distinguish material facts.",
+            "Map each material allegation to evidence and identify disputed facts.",
+            "Review possible counterarguments and alternative explanations.",
+            "Verify every citation before using it in a legal document.",
+            "Obtain qualified legal review before filing, advising or communicating conclusions."
+        ]
+        for i,x in enumerate(priorities,1): self.report.insert("end",f"{i}. {x}\n")
+        self.report.insert("end",f"\n{confidence_note()}\n")
+
+        self._render_matrix(issue_rows)
+        self._render_queries(queries)
+        self.questions.delete("1.0","end")
+        self.questions.insert("end","FOLLOW-UP QUESTIONS FOR THE NEXT RESEARCH ROUND\n\n")
+        for i,q in enumerate(deep_questions,1): self.questions.insert("end",f"{i}. {q}\n")
+
+        self.factmap.delete("1.0","end")
+        self.factmap.insert("end","STRUCTURED FACT MAP\n\n")
+        for label,key in [("People / named persons","people_or_named_persons"),
+                          ("Dates","dates"),("Money mentions","money_mentions"),
+                          ("Emails","emails"),("Phones","phones")]:
+            self.factmap.insert("end",f"{label}: {', '.join(entities[key]) or 'None detected'}\n")
+        self.factmap.insert("end","\nFACT / ALLEGATION CLASSIFICATION\n\n")
+        for label,s in fact_rows:self.factmap.insert("end",f"[{label}] {s}\n")
+
+        self.library.delete("1.0","end")
+        self.library.insert("end","LOCAL DOCUMENT SIMILARITY RESULTS\n\n")
+        for sim,name,path,digest,content in indexed:
+            self.library.insert("end",f"{name} — similarity {sim:.1f}/100\nPath: {path}\nSHA-256: {digest}\n\n")
+        if not indexed:self.library.insert("end","No previously indexed documents matched.\n")
+
+        self.result_data={
+            "case_id":make_case_id(problem),"problem":problem,
+            "jurisdiction":self.jur.get(),"role":self.role.get(),
+            "laws":[build_authority_record(l) for _,_,l in laws],
+            "cases":[build_case_record(c,sim) for sim,c in semantic_cases[:12]],
+            "questions":questions,"deep_questions":deep_questions,
+            "counter_analysis":counters,"evidence_map":evidence_rows,
+            "issue_matrix":issue_rows,"research_queries":queries,
+            "limitation_checks":limitations,"entities":entities,
+            "fact_classification":fact_rows,"risk_flags":risks,
+            "document_matches":[{"name":n,"path":p,"similarity":round(s,2),"sha256":d}
+                                for s,n,p,d,_ in indexed],
+            "contradictions":contradictions,
+            "legal_theories":theories,
+            "element_checklist":element_rows,
+            "verification_gate":gate,
+            "generated_at":datetime.now().isoformat(timespec="seconds")
+        }
+        save_db("Auto-analysis",problem,self.result_data)
+        audit("ANALYZE",self.result_data["case_id"],
+              f"{len(laws)} potential laws; {len(semantic_cases[:12])} case leads; {len(contradictions)} consistency flags.")
+
+    def save(self):
+        if not self.result_data:
+            messagebox.showinfo("Analyze first","Run an analysis before saving.")
+            return
+        title="Case "+datetime.now().strftime("%Y-%m-%d %H:%M")
+        save_db(title,self.result_data["problem"],self.result_data)
+        self.load_history()
+        audit("SAVE_CASE", self.result_data.get("case_id",""), "Case analysis saved locally.")
+        self.load_audit()
+        messagebox.showinfo("Saved","Case saved locally.")
+
+    def load_history(self):
+        self.history.delete("1.0","end")
+        con=sqlite3.connect(DB)
+        con.execute("""CREATE TABLE IF NOT EXISTS analyses(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, title TEXT,
+            problem TEXT, result TEXT)""")
+        rows=con.execute("SELECT created_at,title,problem FROM analyses ORDER BY id DESC LIMIT 100").fetchall()
+        con.commit(); con.close()
+        for dt,title,problem in rows:
+            self.history.insert("end",f"{dt} | {title}\n{problem[:600]}\n\n")
+
+    def export(self):
+        if not self.result_data:
+            messagebox.showinfo("Analyze first","Run an analysis before exporting.")
+            return
+        path=filedialog.asksaveasfilename(defaultextension=".txt",
+              filetypes=[("Legal research report","*.txt"),("JSON","*.json"),("CSV","*.csv")])
+        if not path:return
+        if path.lower().endswith(".json"):
+            Path(path).write_text(json.dumps(self.result_data,indent=2,ensure_ascii=False),encoding="utf-8")
+        elif path.lower().endswith(".csv"):
+            with open(path,"w",newline="",encoding="utf-8") as f:
+                w=csv.writer(f); w.writerow(["Type","Value"])
+                for k,v in self.result_data.items():w.writerow([k,json.dumps(v,ensure_ascii=False)])
+        else:
+            with open(path,"w",encoding="utf-8") as f:
+                f.write("LEGALMIND AI PRO — LEGAL RESEARCH REPORT\n"+"="*72+"\n\n")
+                f.write("Problem:\n"+self.result_data["problem"]+"\n\n")
+                f.write("LAWS\n"+self.laws.get("1.0","end")+"\n")
+                f.write("CASES\n"+self.cases.get("1.0","end")+"\n")
+                f.write("EVIDENCE\n"+self.evidence.get("1.0","end")+"\n")
+                f.write("CASE STRUCTURE / BRIEF\n"+self.report.get("1.0","end"))
+                f.write("\n\nISSUE MATRIX\n"+self.matrix.get("1.0","end"))
+                f.write("\n\nRESEARCH QUERIES\n"+self.queries.get("1.0","end"))
+                f.write("\n\nFOLLOW-UP QUESTIONS\n"+self.questions.get("1.0","end"))
+                f.write("\n\nFACT MAP\n"+self.factmap.get("1.0","end"))
+                f.write("\n\nLOCAL DOCUMENT LIBRARY\n"+self.library.get("1.0","end"))
+                f.write("\n\nLEGAL THEORIES\n"+self.theories.get("1.0","end"))
+                f.write("\n\nVERIFICATION GATE\n"+self.verification.get("1.0","end"))
+        messagebox.showinfo("Exported",f"Report saved to:\n{path}")
+
+if __name__=="__main__":
+    app = LegalMind()
+    app.bind("<Control-Return>", lambda e: app.analyze())
+    app.bind("<Control-s>", lambda e: app.save())
+    app.mainloop()
+
+    def advanced_command_center(self):
+        """Create an audit-oriented research command center using the current analysis state."""
+        try:
+            if hasattr(self, "tabs"):
+                frame = ttk.Frame(self.tabs)
+                self.tabs.add(frame, text="15 Research Center")
+                ttk.Label(frame, text="Research Command Center",
+                          font=("TkDefaultFont", 14, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
+                ttk.Label(
+                    frame,
+                    text=("Use this panel to verify authorities, inspect extracted dates/roles/citations, "
+                          "and prepare a source-first research plan. Similarity is not a liability or outcome prediction."),
+                    wraplength=900, justify="left"
+                ).pack(anchor="w", padx=12, pady=(0, 10))
+
+                self.rc_text = tk.Text(frame, wrap="word", height=25)
+                self.rc_text.pack(fill="both", expand=True, padx=12, pady=8)
+
+                btns = ttk.Frame(frame)
+                btns.pack(fill="x", padx=12, pady=(0, 12))
+                ttk.Button(btns, text="Refresh Research Plan", command=self.refresh_research_center).pack(side="left", padx=(0, 8))
+                ttk.Button(btns, text="Redact Problem Copy", command=self.show_redacted_problem).pack(side="left")
+
+                self.refresh_research_center()
+        except Exception:
+            pass
+
+    def refresh_research_center(self):
+        if not hasattr(self, "rc_text"):
+            return
+        problem = ""
+        for attr in ("problem_text", "problem_input", "input_text", "problem"):
+            obj = getattr(self, attr, None)
+            try:
+                if obj is not None and hasattr(obj, "get"):
+                    problem = obj.get("1.0", "end").strip()
+                    if problem:
+                        break
+            except Exception:
+                pass
+        if not problem:
+            problem = "Enter/analyze a problem statement first."
+
+        pack = generate_structured_case_pack(problem)
+        lines = [
+            f"CASE FINGERPRINT: {pack['case_fingerprint']}",
+            f"GENERATED (UTC): {pack['generated_at_utc']}",
+            "",
+            "EXTRACTED DATES:",
+            *([f"  • {x}" for x in pack["dates"]] or ["  • None detected"]),
+            "",
+            "DETECTED ROLES:",
+            *([f"  • {x}" for x in pack["roles_detected"]] or ["  • None detected"]),
+            "",
+            "USER-CITED PROVISIONS:",
+            *([f"  • {x}" for x in pack["user_citations"]] or ["  • None detected"]),
+            "",
+            "SOURCE-FIRST RESEARCH PLAN:",
+        ]
+        for title, action, url in pack["research_plan"]:
+            lines += [f"  [{title}]", f"    {action}", f"    Official source: {url}", ""]
+        lines += [
+            "SAFETY:",
+            "  This output identifies research leads only. It does not determine that a person violated a law.",
+            "  Verify current text, commencement, amendments, jurisdiction, limitation and the complete authorities.",
+        ]
+        self.rc_text.delete("1.0", "end")
+        self.rc_text.insert("1.0", "\n".join(lines))
+
+    def show_redacted_problem(self):
+        if not hasattr(self, "rc_text"):
+            return
+        problem = ""
+        for attr in ("problem_text", "problem_input", "input_text", "problem"):
+            obj = getattr(self, attr, None)
+            try:
+                if obj is not None and hasattr(obj, "get"):
+                    problem = obj.get("1.0", "end").strip()
+                    if problem:
+                        break
+            except Exception:
+                pass
+        self.rc_text.delete("1.0", "end")
+        self.rc_text.insert("1.0", redact_more_pii(problem))
+
+    def v6_case_intelligence(self):
+        """Show extracted facts, coverage, source ledger and counter-questions."""
+        try:
+            if not hasattr(self, "tabs"):
+                return
+            frame = ttk.Frame(self.tabs)
+            self.tabs.add(frame, text="16 Case Intelligence")
+            ttk.Label(frame, text="Case Intelligence & Verification",
+                      font=("TkDefaultFont", 14, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
+            ttk.Label(
+                frame,
+                text=("This panel is an audit aid. Counts and labels are extraction/research signals, "
+                      "not legal conclusions, liability scores, or outcome predictions."),
+                wraplength=950, justify="left"
+            ).pack(anchor="w", padx=12, pady=(0, 8))
+            self.v6_text = tk.Text(frame, wrap="word", height=28)
+            self.v6_text.pack(fill="both", expand=True, padx=12, pady=8)
+            ttk.Button(frame, text="Refresh Intelligence", command=self.refresh_v6_intelligence).pack(
+                anchor="w", padx=12, pady=(0, 12)
+            )
+            self.refresh_v6_intelligence()
+        except Exception:
+            pass
+
+    def _get_current_problem(self):
+        for attr in ("problem_text", "problem_input", "input_text", "problem"):
+            obj = getattr(self, attr, None)
+            try:
+                if obj is not None and hasattr(obj, "get"):
+                    val = obj.get("1.0", "end").strip()
+                    if val:
+                        return val
+            except Exception:
+                pass
+        return ""
+
+    def refresh_v6_intelligence(self):
+        if not hasattr(self, "v6_text"):
+            return
+        problem = self._get_current_problem()
+        if not problem:
+            self.v6_text.delete("1.0", "end")
+            self.v6_text.insert("1.0", "Enter a problem statement on the Analyze Problem tab first.")
+            return
+
+        pack = build_v6_case_pack(problem)
+        cov = pack["coverage"]
+        lines = [
+            f"CASE ID: {pack['case_fingerprint']}",
+            f"GENERATED: {pack['generated_at_utc']}",
+            "",
+            "EXTRACTION COVERAGE",
+            f"  Facts/statements: {cov['fact_count']}",
+            f"  Candidate laws: {cov['candidate_law_count']}",
+            f"  User-cited provisions: {cov['user_citation_count']}",
+            f"  Dates detected: {cov['date_count']}",
+            f"  Roles detected: {cov['role_count']}",
+            f"  NOTE: {cov['coverage_note']}",
+            "",
+            "FACT LEDGER",
+        ]
+        for f in pack["fact_ledger"]:
+            lines.append(f"  {f['id']} [{f['status']}] {f['statement']}")
+        lines += ["", "CITATION / AUTHORITY LEDGER"]
+        for r in pack["citation_ledger"]:
+            lines += [
+                f"  {r['type']}: {r['authority']}",
+                f"    Source: {r['source']} | Status: {r['status']}",
+                f"    Verify: {r['verification_action']}",
+            ]
+        lines += ["", "COUNTER-ANALYSIS QUESTIONS"]
+        lines += [f"  • {q}" for q in pack["counter_questions"]]
+        lines += ["", "VERIFICATION GATE"]
+        lines += [f"  • {x}" for x in pack["verification_gate"]["checks"]]
+        lines.append("  STATUS: " + pack["verification_gate"]["status"])
+        self.v6_text.delete("1.0", "end")
+        self.v6_text.insert("1.0", "\n".join(lines))
+
+    def load_demo_case(self):
+        """Load a fictional demo matter without using real personal data."""
+        demo = (
+            "On 12 March 2026, a fictional buyer paid ₹50,000 to a fictional seller for goods. "
+            "The seller allegedly promised delivery within 10 days. On 30 March 2026 the buyer "
+            "requested a refund and claims no delivery occurred. The seller disputes the allegations. "
+            "Payment receipt and messages are available."
+        )
+        for attr in ("problem_text", "problem_input", "input_text", "problem"):
+            obj = getattr(self, attr, None)
+            try:
+                if obj is not None and hasattr(obj, "delete") and hasattr(obj, "insert"):
+                    obj.delete("1.0", "end")
+                    obj.insert("1.0", demo)
+                    break
+            except Exception:
+                pass
+
+    def v7_case_workspace_ui(self):
+        """Add a practical workspace for issues, evidence, actions and AI-provider status."""
+        try:
+            if not hasattr(self, "tabs"):
+                return
+            frame = ttk.Frame(self.tabs)
+            self.tabs.add(frame, text="17 Case Workspace")
+
+            top = ttk.Frame(frame)
+            top.pack(fill="x", padx=12, pady=(12, 6))
+            ttk.Label(top, text="Case Workspace",
+                      font=("TkDefaultFont", 14, "bold")).pack(side="left")
+            self.v7_provider_var = tk.StringVar(value="AI Provider: checking...")
+            ttk.Label(top, textvariable=self.v7_provider_var).pack(side="right")
+
+            ttk.Label(
+                frame,
+                text=("Organize the matter into issues, evidence and next actions. "
+                      "These are research/workflow aids and do not determine liability or case outcome."),
+                wraplength=950, justify="left"
+            ).pack(anchor="w", padx=12, pady=(0, 8))
+
+            self.v7_text = tk.Text(frame, wrap="word", height=27)
+            self.v7_text.pack(fill="both", expand=True, padx=12, pady=8)
+
+            bar = ttk.Frame(frame)
+            bar.pack(fill="x", padx=12, pady=(0, 12))
+            ttk.Button(bar, text="Build Workspace", command=self.refresh_v7_workspace).pack(side="left", padx=(0, 6))
+            ttk.Button(bar, text="Copy AI Research Prompt", command=self.copy_v7_prompt).pack(side="left", padx=6)
+            ttk.Button(bar, text="Show Provider Status", command=self.show_v7_provider).pack(side="left", padx=6)
+            self.refresh_v7_workspace()
+        except Exception:
+            pass
+
+    def refresh_v7_workspace(self):
+        if not hasattr(self, "v7_text"):
+            return
+        problem = self._get_current_problem() if hasattr(self, "_get_current_problem") else ""
+        if not problem:
+            self.v7_text.delete("1.0", "end")
+            self.v7_text.insert("1.0", "Enter a problem statement on the Analyze Problem tab first.")
+            return
+        pack = build_case_workspace(problem)
+        lines = [
+            f"CASE ID: {pack['case_id']}",
+            f"CREATED: {pack['created_at']}",
+            "",
+            "ISSUES TO REVIEW",
+        ]
+        for i, x in enumerate(pack["issues"], 1):
+            lines.append(f"  I{i:02d}. [{x['status']}] {x['issue']}")
+        lines += ["", "EVIDENCE CHECKLIST"]
+        for i, x in enumerate(pack["evidence"], 1):
+            lines.append(f"  E{i:02d}. [{x['status']}] {x['item']}")
+        lines += ["", "NEXT ACTIONS"]
+        for i, x in enumerate(pack["actions"], 1):
+            lines.append(f"  A{i:02d}. [{x['status']}] {x['action']}")
+        lines += [
+            "",
+            "AUTHORITY LEDGER",
+        ]
+        if pack["authorities"]:
+            for a in pack["authorities"]:
+                lines.append(f"  [{a['type']}] {a['authority']} — {a['status']}")
+        else:
+            lines.append("  No authorities detected yet.")
+        lines += [
+            "",
+            "VERIFICATION STATUS: " + pack["verification_status"],
+            "Reminder: retrieve current primary sources and read complete judgments before reliance.",
+        ]
+        self.v7_text.delete("1.0", "end")
+        self.v7_text.insert("1.0", "\n".join(lines))
+        if hasattr(self, "v7_provider_var"):
+            st = v7_provider_status()
+            self.v7_provider_var.set(f"AI Provider: {st['provider']}")
+
+    def copy_v7_prompt(self):
+        problem = self._get_current_problem() if hasattr(self, "_get_current_problem") else ""
+        prompt = v7_local_ai_prompt(
+            problem,
+            "Analyze the legal issues, candidate authorities, missing facts, evidence mapping and counter-arguments. "
+            "Cite only sources retrieved and verified from authoritative materials."
+        )
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(prompt)
+            if hasattr(self, "v7_text"):
+                self.v7_text.insert("end", "\n\nAI RESEARCH PROMPT COPIED TO CLIPBOARD.")
+        except Exception:
+            pass
+
+    def show_v7_provider(self):
+        st = v7_provider_status()
+        if hasattr(self, "v7_text"):
+            self.v7_text.insert(
+                "end",
+                f"\n\nPROVIDER STATUS\nProvider: {st['provider']}\n"
+                f"API key configured: {st['api_key_configured']}\nMode: {st['mode']}\n"
+                "No external AI request is made by this local prototype unless a provider connector is added."
+            )
+
+    def v8_research_workbench_ui(self):
+        try:
+            if not hasattr(self, "tabs"):
+                return
+            frame = ttk.Frame(self.tabs)
+            self.tabs.add(frame, text="18 Research Workbench")
+
+            ttk.Label(frame, text="Research Workbench",
+                      font=("TkDefaultFont", 14, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
+            ttk.Label(
+                frame,
+                text=("Matter metadata, source registry, interview questions, research queries and "
+                      "export-ready case bundle. Source verification remains a human responsibility."),
+                wraplength=980, justify="left"
+            ).pack(anchor="w", padx=12, pady=(0, 8))
+
+            form = ttk.Frame(frame)
+            form.pack(fill="x", padx=12, pady=4)
+            self.v8_title = tk.StringVar()
+            self.v8_court = tk.StringVar()
+            self.v8_stage = tk.StringVar(value="RESEARCH")
+            ttk.Label(form, text="Matter title").grid(row=0, column=0, sticky="w")
+            ttk.Entry(form, textvariable=self.v8_title, width=35).grid(row=0, column=1, padx=6)
+            ttk.Label(form, text="Court/Jurisdiction").grid(row=0, column=2, sticky="w")
+            ttk.Entry(form, textvariable=self.v8_court, width=35).grid(row=0, column=3, padx=6)
+            ttk.Label(form, text="Stage").grid(row=0, column=4, sticky="w")
+            ttk.Combobox(form, textvariable=self.v8_stage, values=V8_STAGES, width=18, state="readonly").grid(row=0, column=5, padx=6)
+
+            self.v8_work_text = tk.Text(frame, wrap="word", height=25)
+            self.v8_work_text.pack(fill="both", expand=True, padx=12, pady=8)
+
+            bar = ttk.Frame(frame)
+            bar.pack(fill="x", padx=12, pady=(0, 12))
+            ttk.Button(bar, text="Build Case Bundle", command=self.refresh_v8_workbench).pack(side="left", padx=(0, 6))
+            ttk.Button(bar, text="Interview Questions", command=self.show_v8_questions).pack(side="left", padx=6)
+            ttk.Button(bar, text="Research Queries", command=self.show_v8_queries).pack(side="left", padx=6)
+            ttk.Button(bar, text="AI Connector Status", command=self.show_v8_ai_status).pack(side="left", padx=6)
+            ttk.Button(bar, text="Export Case Bundle", command=self.export_v8_bundle).pack(side="left", padx=6)
+
+            self.refresh_v8_workbench()
+        except Exception:
+            pass
+
+    def refresh_v8_workbench(self):
+        if not hasattr(self, "v8_work_text"):
+            return
+        problem = self._get_current_problem() if hasattr(self, "_get_current_problem") else ""
+        if not problem:
+            self.v8_work_text.delete("1.0", "end")
+            self.v8_work_text.insert("1.0", "Enter a problem statement first.")
+            return
+        bundle = v8_build_case_bundle(
+            problem,
+            metadata={"title": self.v8_title.get(), "court": self.v8_court.get(), "stage": self.v8_stage.get()}
+        )
+        lines = [
+            f"CASE ID: {bundle['case']['case_id']}",
+            f"TITLE: {bundle['case']['title'] or '(untitled)'}",
+            f"COURT / JURISDICTION: {bundle['case']['court'] or '(not supplied)'}",
+            f"STAGE: {bundle['case']['stage']}",
+            "",
+            "ISSUES",
+        ]
+        lines += [f"  • {x['issue']} [{x['status']}]" for x in bundle["issues"]]
+        lines += ["", "EVIDENCE"]
+        lines += [f"  • {x['item']} [{x['status']}]" for x in bundle["evidence"]]
+        lines += ["", "NEXT ACTIONS"]
+        lines += [f"  • {x['action']} [{x['status']}]" for x in bundle["actions"]]
+        lines += ["", "AUTHORITIES"]
+        if bundle["authorities"]:
+            lines += [f"  • {x['authority']} — {x['status']}" for x in bundle["authorities"]]
+        else:
+            lines.append("  • No authority leads detected.")
+        lines += [
+            "",
+            "VERIFICATION: " + bundle["verification_gate"],
+            "",
+            bundle["important_notice"],
+        ]
+        self.v8_work_text.delete("1.0", "end")
+        self.v8_work_text.insert("1.0", "\n".join(lines))
+
+    def show_v8_questions(self):
+        problem = self._get_current_problem() if hasattr(self, "_get_current_problem") else ""
+        qs = v8_interview_questions(problem)
+        if hasattr(self, "v8_work_text"):
+            self.v8_work_text.delete("1.0", "end")
+            self.v8_work_text.insert("1.0", "INTERACTIVE FACT-FINDING QUESTIONS\n\n" + "\n".join(
+                f"{i+1}. {q}" for i, q in enumerate(qs)
+            ))
+
+    def show_v8_queries(self):
+        problem = self._get_current_problem() if hasattr(self, "_get_current_problem") else ""
+        qs = v8_research_queries(problem)
+        if hasattr(self, "v8_work_text"):
+            self.v8_work_text.delete("1.0", "end")
+            self.v8_work_text.insert("1.0", "SOURCE-FIRST RESEARCH QUERIES\n\n" + "\n".join(
+                f"{i+1}. {q}" for i, q in enumerate(qs)
+            ))
+
+    def show_v8_ai_status(self):
+        st = v8_ai_endpoint_status()
+        if hasattr(self, "v8_work_text"):
+            self.v8_work_text.delete("1.0", "end")
+            self.v8_work_text.insert(
+                "1.0",
+                "AI CONNECTOR STATUS\n\n"
+                f"Provider: {st['provider']}\n"
+                f"Endpoint configured: {st['endpoint_configured']}\n"
+                f"API key configured: {st['api_key_configured']}\n"
+                f"Status: {st['status']}\n\n"
+                "This build prepares provider-neutral AI requests but does not silently transmit case data."
+            )
+
+    def export_v8_bundle(self):
+        try:
+            problem = self._get_current_problem() if hasattr(self, "_get_current_problem") else ""
+            if not problem:
+                return
+            bundle = v8_build_case_bundle(
+                problem,
+                metadata={"title": self.v8_title.get(), "court": self.v8_court.get(), "stage": self.v8_stage.get()}
+            )
+            filename = "LegalMind_" + bundle["case"]["case_id"] + "_bundle.json"
+            path = Path.cwd() / filename
+            path.write_text(json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8")
+            if hasattr(self, "v8_work_text"):
+                self.v8_work_text.insert("end", f"\n\nExported: {path}")
+        except Exception as e:
+            if hasattr(self, "v8_work_text"):
+                self.v8_work_text.insert("end", f"\n\nExport error: {e}")
+
+    def v9_workbench_ui(self):
+        try:
+            if not hasattr(self, "tabs"):
+                return
+            frame = ttk.Frame(self.tabs)
+            self.tabs.add(frame, text="19 Legal Graph")
+            ttk.Label(
+                frame, text="Legal Issue → Element → Evidence Graph",
+                font=("TkDefaultFont", 14, "bold")
+            ).pack(anchor="w", padx=12, pady=(12, 4))
+            ttk.Label(
+                frame,
+                text=("Visualize the research structure without treating an extracted match as proof. "
+                      "Every element/evidence link remains UNKNOWN until a human verifies the authority and evidence."),
+                wraplength=980, justify="left"
+            ).pack(anchor="w", padx=12, pady=(0, 8))
+            self.v9_text = tk.Text(frame, wrap="word", height=28)
+            self.v9_text.pack(fill="both", expand=True, padx=12, pady=8)
+            bar = ttk.Frame(frame)
+            bar.pack(fill="x", padx=12, pady=(0, 12))
+            ttk.Button(bar, text="Build Legal Graph", command=self.refresh_v9_graph).pack(side="left", padx=(0, 6))
+            ttk.Button(bar, text="Quality Gate", command=self.show_v9_quality).pack(side="left", padx=6)
+            ttk.Button(bar, text="RAG Contract", command=self.show_v9_rag_contract).pack(side="left", padx=6)
+            self.refresh_v9_graph()
+        except Exception:
+            pass
+
+    def refresh_v9_graph(self):
+        if not hasattr(self, "v9_text"):
+            return
+        problem = self._get_current_problem() if hasattr(self, "_get_current_problem") else ""
+        if not problem:
+            self.v9_text.delete("1.0", "end")
+            self.v9_text.insert("1.0", "Enter a problem statement first.")
+            return
+        graph = v9_issue_element_graph(problem)
+        lines = ["LEGAL GRAPH", ""]
+        for i, issue in enumerate(graph["issues"], 1):
+            lines.append(f"I{i:02d} ISSUE: {issue}")
+            links = [x for x in graph["links"] if x["issue"] == issue]
+            for j, x in enumerate(links, 1):
+                lines.append(f"   E{j:02d} ELEMENT: {x['legal_element']}")
+                lines.append(f"        EVIDENCE: {x['evidence_item']}")
+                lines.append(f"        STATUS: {x['support_status']}")
+                lines.append(f"        SOURCE: {x['source_reference']}")
+        lines += ["", "NOTE: " + graph["warning"]]
+        self.v9_text.delete("1.0", "end")
+        self.v9_text.insert("1.0", "\n".join(lines))
+
+    def show_v9_quality(self):
+        problem = self._get_current_problem() if hasattr(self, "_get_current_problem") else ""
+        bundle = v9_build_full_bundle(problem)
+        gate = bundle["quality_gate"]
+        lines = [
+            "RESEARCH QUALITY GATE",
+            "",
+            "STATUS: " + gate["status"],
+            "",
+            "BLOCKING / FOLLOW-UP ITEMS:",
+        ]
+        lines += [f"  • {x}" for x in gate["blocking_items"]] or ["  • None"]
+        lines += ["", gate["rule"]]
+        if hasattr(self, "v9_text"):
+            self.v9_text.delete("1.0", "end")
+            self.v9_text.insert("1.0", "\n".join(lines))
+
+    def show_v9_rag_contract(self):
+        problem = self._get_current_problem() if hasattr(self, "_get_current_problem") else ""
+        contract = v9_ai_rag_contract(problem)
+        if hasattr(self, "v9_text"):
+            self.v9_text.delete("1.0", "end")
+            self.v9_text.insert(
+                "1.0",
+                "RAG / AI CONTRACT\n\n"
+                + "\n".join(f"• {x}" for x in contract["system_constraints"])
+                + "\n\nProvider-neutral context payload is ready for a real retrieval + LLM connector."
+            )
+
+    def v10_research_ui(self):
+        try:
+            if not hasattr(self, "tabs"):
+                return
+            frame = ttk.Frame(self.tabs)
+            self.tabs.add(frame, text="20 Research AI")
+            ttk.Label(frame, text="Research AI Workbench",
+                      font=("TkDefaultFont", 14, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
+            ttk.Label(
+                frame,
+                text=("Local retrieval, chronology, research-gap detection and report generation. "
+                      "Retrieval scores are relevance signals only, never legal-confidence or outcome scores."),
+                wraplength=1000, justify="left"
+            ).pack(anchor="w", padx=12, pady=(0, 8))
+            self.v10_text = tk.Text(frame, wrap="word", height=27)
+            self.v10_text.pack(fill="both", expand=True, padx=12, pady=8)
+            bar = ttk.Frame(frame)
+            bar.pack(fill="x", padx=12, pady=(0, 12))
+            ttk.Button(bar, text="Analyze Research Gaps", command=self.refresh_v10).pack(side="left", padx=(0, 6))
+            ttk.Button(bar, text="Show Chronology", command=self.show_v10_chronology).pack(side="left", padx=6)
+            ttk.Button(bar, text="Generate HTML Report", command=self.export_v10_html).pack(side="left", padx=6)
+            self.refresh_v10()
+        except Exception:
+            pass
+
+    def refresh_v10(self):
+        if not hasattr(self, "v10_text"):
+            return
+        problem = self._get_current_problem() if hasattr(self, "_get_current_problem") else ""
+        if not problem:
+            self.v10_text.delete("1.0", "end")
+            self.v10_text.insert("1.0", "Enter a problem statement first.")
+            return
+        bundle = v10_build_report_bundle(problem)
+        lines = [
+            "RESEARCH GAP ANALYSIS",
+            "",
+            "CASE ID: " + bundle["case"]["case_id"],
+            "",
+            "FACTS EXTRACTED: " + str(len(bundle["fact_ledger"])),
+            "DATES DETECTED: " + str(len(bundle["chronology"])),
+            "ISSUES: " + str(len(bundle["issues"])),
+            "",
+            "RESEARCH GAPS",
+        ]
+        lines += [f"  • {x}" for x in bundle["research_gaps"]]
+        lines += ["", "RETRIEVAL RULES"]
+        lines += [f"  • {x}" for x in bundle["retrieval_notes"]]
+        self.v10_text.delete("1.0", "end")
+        self.v10_text.insert("1.0", "\n".join(lines))
+
+    def show_v10_chronology(self):
+        problem = self._get_current_problem() if hasattr(self, "_get_current_problem") else ""
+        events = v10_chronology(problem)
+        lines = ["CHRONOLOGY", ""]
+        if events:
+            for e in events:
+                lines.append(f"{e['sequence']}. {e['date_text']} [{e['status']}] {e['event']}")
+        else:
+            lines.append("No explicit dates detected.")
+        if hasattr(self, "v10_text"):
+            self.v10_text.delete("1.0", "end")
+            self.v10_text.insert("1.0", "\n".join(lines))
+
+    def export_v10_html(self):
+        try:
+            problem = self._get_current_problem() if hasattr(self, "_get_current_problem") else ""
+            if not problem:
+                return
+            bundle = v10_build_report_bundle(problem)
+            path = Path.cwd() / f"LegalMind_{bundle['case']['case_id']}_report.html"
+            v10_generate_html_report(bundle, path)
+            if hasattr(self, "v10_text"):
+                self.v10_text.insert("end", f"\n\nHTML report created:\n{path}")
+            try:
+                webbrowser.open(path.resolve().as_uri())
+            except Exception:
+                pass
+        except Exception as e:
+            if hasattr(self, "v10_text"):
+                self.v10_text.insert("end", f"\n\nReport error: {e}")
+
+    def v11_evidence_library_ui(self):
+        try:
+            if not hasattr(self, "tabs"):
+                return
+            self.v11_library = []
+            frame = ttk.Frame(self.tabs)
+            self.tabs.add(frame, text="21 Evidence Library")
+
+            ttk.Label(frame, text="Local Evidence & Judgment Library",
+                      font=("TkDefaultFont", 14, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
+            ttk.Label(
+                frame,
+                text=("Import supported documents, index them locally, and search their text with an "
+                      "explainable relevance score. No file is uploaded by this feature."),
+                wraplength=1000, justify="left"
+            ).pack(anchor="w", padx=12, pady=(0, 8))
+
+            top = ttk.Frame(frame)
+            top.pack(fill="x", padx=12, pady=5)
+            ttk.Button(top, text="Add Document", command=self.v11_add_document).pack(side="left", padx=(0, 6))
+            ttk.Button(top, text="Search Library", command=self.v11_search_prompt).pack(side="left", padx=6)
+            ttk.Button(top, text="Dashboard", command=self.v11_show_dashboard).pack(side="left", padx=6)
+
+            self.v11_query = tk.StringVar()
+            ttk.Entry(top, textvariable=self.v11_query, width=55).pack(side="left", padx=12)
+
+            self.v11_library_text = tk.Text(frame, wrap="word", height=26)
+            self.v11_library_text.pack(fill="both", expand=True, padx=12, pady=8)
+            self.v11_show_dashboard()
+        except Exception:
+            pass
+
+    def v11_add_document(self):
+        try:
+            path = filedialog.askopenfilename(
+                title="Select legal document",
+                filetypes=[
+                    ("Legal documents", "*.pdf *.docx *.txt *.md *.csv *.json *.log"),
+                    ("All supported", "*.pdf *.docx *.txt *.md *.csv *.json *.log"),
+                ],
+            )
+            if not path:
+                return
+            problem = self._get_current_problem() if hasattr(self, "_get_current_problem") else ""
+            case_id = v8_new_case_id(problem or Path(path).name)
+            record = v11_build_index(path, case_id)
+            self.v11_library.append(record)
+            self.v11_library_text.delete("1.0", "end")
+            self.v11_library_text.insert(
+                "1.0",
+                f"ADDED DOCUMENT\n\n"
+                f"File: {record['filename']}\n"
+                f"SHA-256: {record['document_sha256']}\n"
+                f"Text length: {record['text_length']}\n"
+                f"Indexed chunks: {record['chunk_count']}\n\n"
+                "The document remains local in this prototype."
+            )
+        except Exception as e:
+            messagebox.showerror("Document Import", str(e))
+
+    def v11_search_prompt(self):
+        if not hasattr(self, "v11_library_text"):
+            return
+        query = self.v11_query.get().strip()
+        if not query:
+            query = self._get_current_problem() if hasattr(self, "_get_current_problem") else ""
+        hits = v11_search_library(query, self.v11_library, 10)
+        self.v11_library_text.delete("1.0", "end")
+        if not hits:
+            self.v11_library_text.insert("1.0", "No matching indexed passages found.")
+            return
+        lines = [
+            "LOCAL RETRIEVAL RESULTS",
+            "",
+            "Relevance score = explainable local text similarity, not legal confidence.",
+            "",
+        ]
+        for h in hits:
+            lines += [
+                f"#{h['rank'] if 'rank' in h else ''} {h['filename']} | chunk {h['chunk_id']} | score {h['score']}",
+                f"SHA-256: {h['document_sha256']}",
+                f"Excerpt: {h['text'][:900]}",
+                "",
+            ]
+        self.v11_library_text.insert("1.0", "\n".join(lines))
+
+    def v11_show_dashboard(self):
+        if not hasattr(self, "v11_library_text"):
+            return
+        problem = self._get_current_problem() if hasattr(self, "_get_current_problem") else ""
+        m = v11_dashboard_metrics(problem, getattr(self, "v11_library", []))
+        lines = [
+            "CASE RESEARCH DASHBOARD",
+            "",
+            f"Case ID: {m['case_id'] or '(no problem statement)'}",
+            f"Extracted facts/statements: {m['facts']}",
+            f"Detected dated events: {m['dates']}",
+            f"Research gaps: {m['research_gaps']}",
+            f"Local documents: {m['documents']}",
+            f"Indexed chunks: {m['indexed_chunks']}",
+            f"User-cited authority leads: {m['authority_leads']}",
+            "",
+            "STATUS: RESEARCH SUPPORT — HUMAN VERIFICATION REQUIRED",
+            "No metric above represents guilt, liability, confidence, or case outcome.",
+        ]
+        self.v11_library_text.delete("1.0", "end")
+        self.v11_library_text.insert("1.0", "\n".join(lines))
+
+    def v12_research_cockpit_ui(self):
+        try:
+            if not hasattr(self, "tabs"):
+                return
+            frame = ttk.Frame(self.tabs)
+            self.tabs.add(frame, text="22 Research Cockpit")
+
+            ttk.Label(
+                frame, text="Legal Research Cockpit",
+                font=("TkDefaultFont", 14, "bold")
+            ).pack(anchor="w", padx=12, pady=(12, 4))
+            ttk.Label(
+                frame,
+                text=("Claim ledger + counter-analysis + memorandum outline + local-source retrieval. "
+                      "This is a research workspace, not an automated legal decision-maker."),
+                wraplength=1050, justify="left"
+            ).pack(anchor="w", padx=12, pady=(0, 8))
+
+            bar = ttk.Frame(frame)
+            bar.pack(fill="x", padx=12, pady=5)
+            ttk.Button(bar, text="Build Session", command=self.v12_build_session).pack(side="left", padx=(0, 6))
+            ttk.Button(bar, text="Claim Ledger", command=self.v12_claims).pack(side="left", padx=6)
+            ttk.Button(bar, text="Counter-Analysis", command=self.v12_opposition).pack(side="left", padx=6)
+            ttk.Button(bar, text="Memo Outline", command=self.v12_outline).pack(side="left", padx=6)
+            ttk.Button(bar, text="Save Session", command=self.v12_save_session).pack(side="left", padx=6)
+
+            self.v12_text = tk.Text(frame, wrap="word", height=27)
+            self.v12_text.pack(fill="both", expand=True, padx=12, pady=8)
+            self.v12_session = None
+            self.v12_build_session()
+        except Exception:
+            pass
+
+    def v12_build_session(self):
+        if not hasattr(self, "v12_text"):
+            return
+        problem = self._get_current_problem() if hasattr(self, "_get_current_problem") else ""
+        if not problem:
+            self.v12_text.delete("1.0", "end")
+            self.v12_text.insert("1.0", "Enter a problem statement first.")
+            return
+        library = getattr(self, "v11_library", [])
+        self.v12_session = v12_build_research_session(problem, library)
+        s = self.v12_session
+        lines = [
+            "RESEARCH SESSION",
+            "",
+            f"Session ID: {s['session_id']}",
+            f"Case ID: {s['case']['case_id']}",
+            f"Created: {s['created_at_utc']}",
+            "",
+            f"Claims: {len(s['claims'])}",
+            f"Issues: {len(s['issues'])}",
+            f"Research gaps: {len(s['research_gaps'])}",
+            f"Local retrieved passages: {len(s['retrieved_local_sources'])}",
+            "",
+            "STATUS: " + s["safety_status"],
+        ]
+        self.v12_text.delete("1.0", "end")
+        self.v12_text.insert("1.0", "\n".join(lines))
+
+    def v12_claims(self):
+        if not self.v12_session:
+            self.v12_build_session()
+        if hasattr(self, "v12_text") and self.v12_session:
+            self.v12_text.delete("1.0", "end")
+            self.v12_text.insert("1.0", v12_render_claim_ledger(self.v12_session))
+
+    def v12_opposition(self):
+        if not self.v12_session:
+            self.v12_build_session()
+        if hasattr(self, "v12_text") and self.v12_session:
+            self.v12_text.delete("1.0", "end")
+            self.v12_text.insert("1.0", v12_render_opposition(self.v12_session))
+
+    def v12_outline(self):
+        if not self.v12_session:
+            self.v12_build_session()
+        if hasattr(self, "v12_text") and self.v12_session:
+            self.v12_text.delete("1.0", "end")
+            self.v12_text.insert("1.0", v12_render_draft_outline(self.v12_session))
+
+    def v12_save_session(self):
+        try:
+            if not self.v12_session:
+                self.v12_build_session()
+            if not self.v12_session:
+                return
+            path = Path.cwd() / f"LegalMind_{self.v12_session['session_id']}.json"
+            path.write_text(json.dumps(self.v12_session, indent=2, ensure_ascii=False), encoding="utf-8")
+            if hasattr(self, "v12_text"):
+                self.v12_text.insert("end", f"\n\nSaved research session:\n{path}")
+        except Exception as e:
+            if hasattr(self, "v12_text"):
+                self.v12_text.insert("end", f"\n\nSave error: {e}")
